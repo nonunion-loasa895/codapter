@@ -13,10 +13,13 @@ await rm(fileURLToPath(legacyOutfile), { force: true });
 await rm(fileURLToPath(legacySourceMapOutfile), { force: true });
 
 await esbuild.build({
+  banner: {
+    js: 'import { createRequire } from "node:module";const require = createRequire(import.meta.url);',
+  },
   bundle: true,
   entryPoints: [fileURLToPath(entryPoint)],
-  external: ["ws"],
   format: "esm",
+  minify: true,
   outfile: fileURLToPath(outfile),
   platform: "node",
   sourcemap: true,
