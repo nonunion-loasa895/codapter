@@ -16,9 +16,15 @@ Build **codapter** — a protocol adapter that allows the **Codex Desktop GUI** 
 4. **Model switching**: Select from available Pi models via the GUI model picker
 5. **Session persistence**: Close and reopen the app; threads and history are preserved
 6. **Standalone shell**: `command/exec` works for running user commands independent of the LLM
-7. **Remote mode**: Works over SSH tunnel via WebSocket transport
+7. **Remote mode**: Works over SSH tunnel via WebSocket or UDS transport
 8. **Interrupt**: Cancel in-progress turns
 9. **Backend pluggability**: Adding a new backend requires implementing the `IBackend` interface, not modifying core adapter code
+
+### Scope
+
+- **Platform**: Linux and macOS. Windows is out of scope for v0.1.
+- **Remote mode**: Codapter listens on WebSocket (TCP or UDS). The user is responsible for installing codapter on the remote host and setting up SSH tunneling. There is no automated remote bootstrap/deployment in v0.1.
+- **Wire protocol source of truth**: The Codex app-server protocol types at `codex-rs/app-server-protocol/schema/typescript/v2/` (added as a git submodule). These auto-generated TypeScript types define the exact JSON shapes the GUI expects. All protocol-facing implementation must reference these types, not narrative descriptions in this document.
 
 ---
 
@@ -604,16 +610,16 @@ Pi is a **TypeScript** agent system at `packages/coding-agent/`. Communication i
 | 1 | **Model selection** | Expose Pi's full available model list via `model/list` | Use `provider/model` format (e.g., `anthropic/claude-sonnet-4-20250514`). Pi extracts provider from prefix. |
 | 2 | **Initialize identity** | Configurable via `emulateCodexIdentity` flag (default: `true`) | When true: report as `codex-app-server` with matching platform info. When false: report as `pi-adapter`. Default to true since userAgent goes to Sentry. |
 | 3 | **Config/read** | Return minimal stubs/defaults | Don't map Pi config to Codex format initially. Return sensible defaults so GUI settings pages render without errors. |
-| 4 | **Config writes** | Acknowledge but no-op | Accept write requests, return success, don't persist. Prevents GUI errors. |
+| 4 | **Config writes** | In-memory persistence per adapter lifecycle | Config writes stored in memory so `config/read` returns consistent values within the same session. Not persisted to disk. Prevents GUI retry loops from write-then-read-back mismatches. |
 | 5 | **Pi auth/config** | Use Pi's existing `~/.pi/agent/` defaults | Don't try to manage Pi API keys through the Codex GUI. Pi uses its own `auth.json` and default home directory. |
 | 6 | **Approval requests** | Auto-approve / don't generate | Pi auto-executes tools. The adapter doesn't generate approval request events. Tool executions are reported as completed items directly. |
 | 7 | **Thinking/reasoning** | Map Pi thinking to Codex reasoning events | Pi `thinking_delta` → Codex `agent_reasoning_delta`. Don't suppress reasoning display. |
-| 8 | **Thread persistence mapping** | Separate adapter state directory | Store thread-to-session mapping in `~/.local/share/codex-pi-adapter/` (XDG-compliant) or similar, not alongside Pi sessions. |
+| 8 | **Thread registry (single source of truth)** | Adapter-owned thread registry is authoritative | The adapter's thread registry (at `~/.local/share/codapter/threads.json`) is the single source of truth for thread identity, names, archive state, cwd, and metadata. Backend session locators (e.g., Pi session file paths) are stored as internal metadata within the registry, not exposed through IBackend. Backend session scans are used only for initial import/reconciliation, not for ongoing thread listing. IBackend uses opaque `sessionId` strings that the adapter maps internally to backend-specific locators. |
 | 9 | **Steering** | Map `turn/interrupt` → Pi `abort`; sequential `turn/start` → Pi `prompt` | Keep interaction model simple. Don't expose Pi's `steer` or `follow_up` directly. |
 | 10 | **Sub-agents** | Not supported | Pi has no sub-agent concept. `collab_agent_*` events are never emitted. |
 | 11 | **GUI constraint** | GUI drives capabilities | The Codex GUI is the constraint. Only expose behaviors the GUI can represent. If Pi does something the GUI can't show, translate or suppress. |
 | 12 | **Message interleaving** | Adapter decomposes Pi's interleaved content into sequential Codex ThreadItems | Pi interleaves text, thinking, and tool calls in one message. Codex uses separate items. Adapter needs a per-thread state machine to track current item type and emit proper item boundaries. |
-| 13 | **Session/thread listing** | Read Pi session directory directly | Pi has no `list_sessions` RPC command. Adapter scans `~/.pi/agent/sessions/` JSONL files, extracts headers (id, name, timestamp, cwd), and returns them as Codex threads. ThreadId-to-session mapping stored in adapter state directory. |
+| 13 | **Session/thread listing** | Adapter registry is authoritative; Pi session scan for import only | `thread/list` reads from the adapter's thread registry, not from Pi's session directory. Pi session directory is scanned only for initial import/reconciliation of sessions created outside the adapter. |
 | 14 | **command/exec** | Map to Pi `bash` RPC command | Standalone shell execution, independent of LLM conversation. Output streams to GUI terminal, not fed to LLM. Same behavior as Codex. |
 | 15 | **Parallel tool calls** | Supported | Both Pi and Codex support parallel tool execution. Adapter maps Pi's concurrent tool_execution events to concurrent Codex ThreadItems within a turn. |
 | 16 | **Transport modes** | Support both stdio and WebSocket | Stdio for local mode (GUI spawns adapter as child process). WebSocket (`--listen ws://...`) for remote mode via SSH tunnel. Both reuse the same protocol handler. |
@@ -1073,31 +1079,55 @@ interface IBackend {
   dispose(): Promise<void>
   isAlive(): boolean
 
-  // Session
+  // Session management — all use opaque sessionId, not file paths
   createSession(cwd: string): Promise<BackendSession>
-  resumeSession(sessionPath: string, cwd: string): Promise<BackendSession>
-  forkSession(sessionPath: string): Promise<BackendSession>
-  listSessions(): Promise<BackendSessionInfo[]>
-  readSessionHistory(sessionPath: string): Promise<BackendMessage[]>
-  setSessionName(sessionPath: string, name: string): Promise<void>
+  resumeSession(sessionId: string, cwd: string): Promise<BackendSession>
+  forkSession(sessionId: string): Promise<BackendSession>
+  disposeSession(sessionId: string): Promise<void>
+  readSessionHistory(sessionId: string): Promise<BackendMessage[]>
+  setSessionName(sessionId: string, name: string): Promise<void>
+  getCapabilities(): BackendCapabilities
 
   // Prompting
-  prompt(sessionId: string, text: string, images?: ImageInput[]): Promise<void>
+  prompt(sessionId: string, turnId: string, text: string, images?: ImageInput[]): Promise<void>
   abort(sessionId: string): Promise<void>
 
-  // Events
+  // Elicitation
+  respondToElicitation(sessionId: string, requestId: string, response: ElicitationResponse): Promise<void>
+
+  // Events — listener receives BackendEvent with full correlation context
   onEvent(sessionId: string, listener: BackendEventListener): Disposable
 
   // Models
   listModels(): Promise<BackendModel[]>
   setModel(sessionId: string, provider: string, model: string): Promise<void>
 
-  // Shell
-  exec(command: string[], options: ExecOptions): Promise<ExecResult>
-
   // State
   getSessionState(sessionId: string): Promise<BackendSessionState>
 }
+
+// Every event carries correlation context for routing and stale-event gating
+type BackendEvent =
+  | { type: "text_delta"; turnId: string; delta: string }
+  | { type: "thinking_delta"; turnId: string; delta: string }
+  | { type: "tool_start"; turnId: string; toolCallId: string; toolName: string; args: unknown }
+  | { type: "tool_update"; turnId: string; toolCallId: string; output: string; isCumulative: boolean }
+  | { type: "tool_end"; turnId: string; toolCallId: string; result: ToolResult }
+  | { type: "message_end"; turnId: string; stopReason: string }
+  | { type: "elicitation_request"; turnId: string; requestId: string; method: string; params: unknown }
+  | { type: "error"; turnId: string; message: string }
+  | { type: "token_usage"; turnId: string; inputTokens: number; outputTokens: number }
+
+// isCumulative on tool_update: if true, output is full accumulated output (Pi behavior);
+// adapter must diff against previous to extract true delta for Codex streaming.
+// If false, output is a pure delta (can forward directly).
+
+interface BackendCapabilities {
+  supportsImages: boolean
+  supportsThinking: boolean
+  supportsParallelTools: boolean
+  supportedToolTypes: string[]  // e.g., ["bash", "edit", "write", "read", "grep", "find", "ls"]
+}
 ```
 
-Each backend method maps to one or more Codex RPC methods. The adapter core translates between Codex protocol and this interface.
+Each backend method maps to one or more Codex RPC methods. The adapter core translates between Codex protocol and this interface. Note: `command/exec` (standalone shell) is **not** part of IBackend — it is implemented natively by the adapter using Node.js `child_process` (Decision #35).

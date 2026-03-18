@@ -71,17 +71,24 @@ After Milestone 1.1 (project scaffolding) is complete, work can split into paral
 ### 1.2 IBackend Interface
 - [ ] Define `IBackend` interface in `packages/core/src/backend.ts`
 - [ ] Methods: `initialize`, `dispose`, `isAlive`
-- [ ] Methods: `createSession`, `resumeSession`, `forkSession`, `disposeSession`
-- [ ] Methods: `listSessions`, `readSessionHistory`, `setSessionName`
+- [ ] Methods: `createSession`, `resumeSession`, `forkSession`, `disposeSession` — all use opaque `sessionId`, not file paths
+- [ ] Methods: `readSessionHistory`, `setSessionName`
 - [ ] Methods: `prompt(sessionId, turnId, text, images?)`, `abort(sessionId)`
 - [ ] Methods: `listModels`, `setModel`, `getCapabilities`
 - [ ] Methods: `respondToElicitation(sessionId, requestId, response)`
 - [ ] Event interface: `onEvent(sessionId, listener): Disposable`
-- [ ] Use opaque `sessionId: string`, not file paths
-- [ ] Define `BackendEvent` union type (text_delta, thinking_delta, tool_start, tool_update, tool_end, message_end, error)
-- [ ] Write `docs/backend-interface.md`
+- [ ] Define `BackendEvent` union type with full correlation context:
+  - Every event carries `turnId` for stale-event gating
+  - `tool_start`/`tool_update`/`tool_end` carry `toolCallId` for parallel tool demuxing
+  - `tool_update` has `isCumulative: boolean` flag (true = full output, adapter diffs; false = pure delta)
+  - `elicitation_request` carries `requestId` for response matching
+  - `token_usage` event for reporting input/output token counts
+- [ ] Define `BackendCapabilities` type (supportsImages, supportsThinking, supportsParallelTools, supportedToolTypes)
+- [ ] Note: `command/exec` is NOT part of IBackend — adapter-native (Decision #35)
+- [ ] Write `docs/backend-interface.md` with full contract documentation
+- [ ] Reference Codex protocol types from submodule for exact payload shapes
 
-**Done when**: Interface compiles, JSDoc on all methods, documentation written.
+**Done when**: Interface compiles, JSDoc on all methods, documentation written. Event payloads have explicit contracts for correlation, delta semantics, and terminal markers.
 
 ### 1.3 Transport Layer
 - [ ] Implement NDJSON framing: `parseNdjsonLine()`, `serializeNdjsonLine()`
@@ -140,51 +147,59 @@ The GUI calls `config/read` immediately after `initialize`. These must be in Mil
 
 ## Milestone 2: Thread Lifecycle
 
-### 2.1 Thread State Management
-- [ ] Create adapter state directory (`~/.local/share/codapter/`)
-- [ ] Implement thread-to-session mapping store (JSON file)
-- [ ] Thread ID generation (UUID)
-- [ ] Store: threadId → {sessionPath, name, createdAt, updatedAt, archived, cwd}
-- [ ] Handle mapping corruption: validate on load, skip invalid entries
-- [ ] Atomic writes for mapping store (write to temp file + rename) to prevent multi-window corruption
-- [ ] Unit tests: create, read, update, delete mappings
-- [ ] Unit tests: corrupt file recovery
-- [ ] Unit tests: concurrent write safety
+### 2.1 Thread Registry (Single Source of Truth)
 
-**Done when**: Mapping store persists across adapter restarts, safe under concurrent access.
+The adapter-owned thread registry is authoritative for all thread identity, metadata, and lifecycle state. Backend session locators are internal metadata within the registry. `thread/list`, archive state, names, and cwd all come from this registry, never from backend session scans.
+
+- [ ] Create adapter state directory (`~/.local/share/codapter/`)
+- [ ] Implement thread registry (`threads.json`)
+- [ ] Thread ID generation (UUID)
+- [ ] Registry entry: `threadId → {backendSessionId, backendType, name, createdAt, updatedAt, archived, cwd, preview, modelProvider}`
+- [ ] `backendSessionId` is opaque — the backend maps it internally to its own locator (e.g., Pi session file path)
+- [ ] `thread/list` reads exclusively from registry, not from backend
+- [ ] Optional: backend session import/reconciliation for sessions created outside the adapter
+- [ ] Handle registry corruption: validate on load, skip invalid entries, log warnings
+- [ ] Atomic writes (write to temp file + rename) to prevent torn writes
+- [ ] Note: v0.1 assumes single adapter instance per state directory. Multi-window/multi-process write safety (locking or CAS) is deferred.
+- [ ] Unit tests: create, read, update, delete entries
+- [ ] Unit tests: corrupt file recovery
+
+**Done when**: Thread registry persists across adapter restarts. All thread metadata queries read from registry.
 
 ### 2.2 Pi Backend Implementation (session lifecycle)
 - [ ] Implement `PiBackend` class implementing `IBackend`
-- [ ] `createSession`: spawn Pi process (`--mode rpc`), send `new_session`
-- [ ] `resumeSession`: spawn Pi process, send `switch_session` with session path
-- [ ] `forkSession`: spawn Pi process, load parent session, call `fork`
-- [ ] `disposeSession`: terminate Pi process
-- [ ] `listSessions`: scan Pi session directory, parse JSONL headers
-- [ ] `readSessionHistory`: parse Pi JSONL session file → BackendMessage[]
+- [ ] Internal mapping: opaque `sessionId` ↔ Pi session file path (managed inside PiBackend, not exposed)
+- [ ] `createSession`: spawn Pi process (`--mode rpc`), send `new_session`, return opaque sessionId
+- [ ] `resumeSession`: spawn Pi process, resolve sessionId → file path internally, send `switch_session`
+- [ ] `forkSession`: spawn Pi process, load parent session, call `fork`, return new sessionId
+- [ ] `disposeSession`: terminate Pi process, clean up internal mapping
+- [ ] `readSessionHistory`: resolve sessionId → file path, parse Pi JSONL session file → BackendMessage[]
 - [ ] `setSessionName`: call Pi `set_session_name`
+- [ ] `getCapabilities`: return Pi's supported features (images, thinking, parallel tools, tool types)
 - [ ] Pi process lifecycle: spawn, track, idle timeout, terminate
 - [ ] Configurable idle timeout (env var or TOML, default 5 min)
 - [ ] Max concurrent process limit (default 10)
 - [ ] Child process orphan cleanup: SIGINT/SIGTERM handler kills all Pi children on adapter exit
 - [ ] Handle Pi `cancelled: true` responses from `new_session`/`switch_session`/`fork`
-- [ ] Handle Pi `tool_execution_update` as cumulative output (not pure delta) — diff against previous to extract true delta
+- [ ] Handle Pi `tool_execution_update` as cumulative output — set `isCumulative: true` on BackendEvent, adapter diffs
 - [ ] Robust NDJSON line-buffering for Pi stdout (handle OS pipe buffer fragmentation)
+- [ ] Emit BackendEvents with `turnId` and `toolCallId` correlation from Pi event stream
 - [ ] Unit tests with mock Pi process (mock stdin/stdout)
 
-**Done when**: Can create, resume, fork, list, and dispose sessions through PiBackend. Clean shutdown kills all children.
+**Done when**: Can create, resume, fork, and dispose sessions through PiBackend. SessionIds are opaque. Clean shutdown kills all children.
 
 ### 2.3 Thread RPC Methods
-- [ ] `thread/start` → call `backend.createSession()`, return Thread object
-- [ ] `thread/resume` → call `backend.resumeSession()`, return Thread with turns
-- [ ] `thread/read` → call `backend.readSessionHistory()`, translate to ThreadItems
-- [ ] `thread/fork` → reject if turn active; call `backend.forkSession()`, return new Thread
-- [ ] `thread/name/set` → call `backend.setSessionName()`
-- [ ] `thread/list` → call `backend.listSessions()`, return paginated list
-- [ ] `thread/archive` / `thread/unarchive` → update mapping store flag
+- [ ] `thread/start` → call `backend.createSession()`, register in thread registry, return Thread object
+- [ ] `thread/resume` → look up sessionId from registry, call `backend.resumeSession()`, return Thread with turns
+- [ ] `thread/read` → look up sessionId from registry, call `backend.readSessionHistory()`, translate to ThreadItems
+- [ ] `thread/fork` → reject if turn active; call `backend.forkSession()`, register new thread in registry, return new Thread
+- [ ] `thread/name/set` → call `backend.setSessionName()`, update registry
+- [ ] `thread/list` → read from thread registry (not backend), return paginated list
+- [ ] `thread/archive` / `thread/unarchive` → update registry archive flag
 - [ ] Per-thread state machine: `starting → ready → turn_active → forking → terminating`
 - [ ] Request queue: buffer turn/start until thread state is `ready`
 - [ ] Thread title generation from first user message
-- [ ] `thread/metadata/update` → update cwd/git info in mapping store
+- [ ] `thread/metadata/update` → update cwd/git info in thread registry
 - [ ] `thread/loaded/list` → return list of currently loaded (process-active) threads
 - [ ] `thread/unsubscribe` → stop sending notifications for a thread to this connection
 - [ ] Token usage: emit `thread/tokenUsage/updated` from Pi `get_session_stats` on turn completion
