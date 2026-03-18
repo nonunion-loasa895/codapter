@@ -1,0 +1,477 @@
+# Codapter
+
+A protocol adapter that lets the [Codex Desktop](https://developers.openai.com/codex/app) GUI work with alternative AI backends. Set `CODEX_CLI_PATH` to point at codapter, launch Codex Desktop, and your conversations are powered by the backend of your choice.
+
+**First supported backend**: [Pi](https://github.com/badlogic/pi-mono) (`@mariozechner/pi-coding-agent`) with multi-provider LLM support (Anthropic, OpenAI, Google, Mistral, and more).
+
+## How It Works
+
+Codapter implements the Codex app-server JSON-RPC protocol — the same wire protocol the Codex Desktop Electron app uses to talk to the official Codex CLI. The GUI connects to codapter over stdio (local) or WebSocket (remote), and codapter translates every request into the target backend's native protocol.
+
+```mermaid
+graph TB
+    GUI["Codex Desktop GUI<br/>(unmodified Electron app)"]
+
+    subgraph Codapter
+        Transport["Transport Layer<br/>stdio / WebSocket TCP / WebSocket UDS"]
+        AppServer["App Server<br/>JSON-RPC protocol handler"]
+        Registry["Thread Registry<br/>persistent thread metadata"]
+        ConfigStore["Config Store<br/>in-memory settings"]
+        CmdExec["Command Exec<br/>adapter-native shell"]
+        TurnSM["Turn State Machine<br/>event decomposition"]
+    end
+
+    subgraph Backend["Backend (Pi)"]
+        PiBackend["Pi Backend<br/>IBackend implementation"]
+        PiProc1["Pi Process 1<br/>Thread A"]
+        PiProc2["Pi Process 2<br/>Thread B"]
+    end
+
+    GUI -->|"JSON-RPC<br/>NDJSON / WebSocket"| Transport
+    Transport --> AppServer
+    AppServer --> Registry
+    AppServer --> ConfigStore
+    AppServer --> CmdExec
+    AppServer --> TurnSM
+    TurnSM --> PiBackend
+    PiBackend --> PiProc1
+    PiBackend --> PiProc2
+```
+
+## Quick Start
+
+### Prerequisites
+
+- **Node.js 22+**
+- **Pi coding agent** installed and configured with API keys (see [Pi setup](https://github.com/badlogic/pi-mono))
+- **Codex Desktop** installed ([download](https://developers.openai.com/codex/app))
+
+### Install & Build
+
+```bash
+git clone <repo-url> codapter
+cd codapter
+npm install
+npm run build
+```
+
+### Run Locally
+
+Point Codex Desktop at codapter:
+
+```bash
+export CODEX_CLI_PATH="$(pwd)/dist/codapter.mjs"
+# Launch Codex Desktop — it will use codapter instead of the official CLI
+```
+
+Or run codapter directly for testing:
+
+```bash
+# Stdio mode (how Codex Desktop spawns it)
+node dist/codapter.mjs app-server
+
+# WebSocket mode (for remote connections)
+node dist/codapter.mjs app-server --listen ws://127.0.0.1:9234
+
+# Unix domain socket mode (for containerized environments)
+node dist/codapter.mjs app-server --listen unix:///tmp/codapter.sock
+
+# Multiple listeners simultaneously
+node dist/codapter.mjs app-server \
+  --listen ws://127.0.0.1:9234 \
+  --listen unix://$HOME/.codex/adapter.sock
+```
+
+### Build Distribution Binary
+
+```bash
+npm run build:dist
+# Creates dist/codapter.mjs — a single-file bundled executable
+```
+
+## Architecture
+
+### Transport Layer
+
+Codapter supports three transport modes, all serving the same JSON-RPC protocol:
+
+| Mode | Flag | Use Case |
+|------|------|----------|
+| **stdio** | *(default, no flag)* | Local mode — Codex Desktop spawns codapter as a child process |
+| **WebSocket/TCP** | `--listen ws://host:port` | Remote mode — SSH tunnel to this endpoint |
+| **WebSocket/UDS** | `--listen unix:///path/to/sock` | Container mode — SSH streamlocal forwarding |
+
+The `CODAPTER_LISTEN` environment variable can be used instead of `--listen` flags (comma-separated for multiple listeners).
+
+All WebSocket listeners serve the `/rpc` endpoint. Health checks are available at `/healthz` and `/readyz`.
+
+### Request Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant GUI as Codex Desktop
+    participant Adapter as Codapter
+    participant Registry as Thread Registry
+    participant Backend as Pi Backend
+    participant Pi as Pi Process
+
+    GUI->>Adapter: initialize {clientInfo, capabilities}
+    Adapter->>GUI: {userAgent, platformFamily, platformOs}
+    GUI->>Adapter: initialized (notification)
+
+    Note over GUI,Adapter: Connection ready
+
+    GUI->>Adapter: thread/start {model, cwd}
+    Adapter->>Backend: createSession(cwd)
+    Backend->>Pi: spawn pi-coding-agent --mode rpc
+    Pi-->>Backend: process ready
+    Adapter->>Registry: store thread metadata
+    Adapter->>GUI: {thread: {id, status, cwd, ...}}
+
+    GUI->>Adapter: turn/start {threadId, input}
+    Adapter->>Backend: prompt(sessionId, turnId, text)
+    Backend->>Pi: {"type":"prompt","message":"..."}
+
+    loop Streaming Events
+        Pi-->>Backend: text_delta / tool_start / tool_end / ...
+        Backend-->>Adapter: BackendEvent
+        Adapter->>Adapter: TurnStateMachine processes event
+        Adapter-->>GUI: item/agentMessage/delta
+        Adapter-->>GUI: item/started (commandExecution)
+        Adapter-->>GUI: item/commandExecution/outputDelta
+        Adapter-->>GUI: item/completed
+    end
+
+    Pi-->>Backend: message_end
+    Backend-->>Adapter: {type: "message_end"}
+    Adapter-->>GUI: turn/completed {status: "completed"}
+```
+
+### Thread & Session Model
+
+Codapter maintains a **thread registry** as the single source of truth for all thread identity and metadata. Each thread maps to a backend session through an opaque session ID.
+
+```mermaid
+graph LR
+    subgraph "Thread Registry (persistent)"
+        T1["Thread abc-123<br/>name: 'Fix login bug'<br/>archived: false<br/>cwd: /home/user/project"]
+        T2["Thread def-456<br/>name: 'Add tests'<br/>archived: false<br/>cwd: /home/user/project"]
+        T3["Thread ghi-789<br/>name: 'Old thread'<br/>archived: true"]
+    end
+
+    subgraph "Backend Sessions"
+        S1["Pi Session pi_session_aaa<br/>(process running)"]
+        S2["Pi Session pi_session_bbb<br/>(process idle)"]
+        S3["Pi Session pi_session_ccc<br/>(no process)"]
+    end
+
+    T1 -->|backendSessionId| S1
+    T2 -->|backendSessionId| S2
+    T3 -->|backendSessionId| S3
+```
+
+**Storage**: `~/.local/share/codapter/threads.json` (atomic writes via temp file + rename)
+
+**Key behaviors**:
+- `thread/list` reads exclusively from the registry — never from the backend
+- `thread/start` creates both a registry entry and a backend session
+- `thread/resume` spawns a new backend process and reattaches to the existing session
+- `thread/fork` creates a new registry entry and clones the backend session
+- `thread/archive` marks the thread in the registry and disposes the backend process
+
+### Turn State Machine
+
+Each active turn runs a state machine that decomposes backend events into Codex GUI notifications:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle: thread created
+    Idle --> TurnActive: turn/start
+    TurnActive --> TurnActive: text_delta → item/agentMessage/delta
+    TurnActive --> TurnActive: thinking_delta → item/reasoning/summaryTextDelta
+    TurnActive --> TurnActive: tool_start → item/started
+    TurnActive --> TurnActive: tool_update → item/outputDelta
+    TurnActive --> TurnActive: tool_end → item/completed
+    TurnActive --> Idle: message_end → turn/completed(completed)
+    TurnActive --> Idle: error → turn/completed(failed)
+    TurnActive --> Idle: turn/interrupt → turn/completed(interrupted)
+```
+
+**Tool classification** is heuristic — based on the tool name:
+- Names matching `bash`, `shell`, `command` → `commandExecution` item
+- Names matching `edit`, `write`, `patch`, `file` → `fileChange` item
+- Everything else → `agentMessage` item (tool output rendered as text)
+
+**Cumulative output handling**: Pi's `tool_execution_update` sends cumulative (full) output, not deltas. The state machine diffs against previous output to extract the true delta for Codex streaming.
+
+### Command Execution
+
+Standalone shell commands (`command/exec`) are handled **natively by the adapter** using Node.js `child_process`, not routed through the backend. This avoids blocking the backend's single-threaded session.
+
+| Method | Description |
+|--------|-------------|
+| `command/exec` | Spawn process, buffer or stream output |
+| `command/exec/write` | Write to process stdin (base64 encoded) |
+| `command/exec/terminate` | Kill process with SIGTERM |
+
+Output is capped at 1MB per stream by default (configurable via `outputBytesCap`). Streaming mode (`streamStdoutStderr: true`) sends `command/exec/outputDelta` notifications as data arrives.
+
+> **Note**: PTY/TTY mode (`tty: true`) is not supported. The Codex Desktop GUI does not appear to use this mode.
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CODEX_CLI_PATH` | Set this to codapter's path so Codex Desktop uses it | — |
+| `CODAPTER_LISTEN` | Comma-separated listener URIs (alternative to `--listen`) | *(stdio)* |
+| `CODAPTER_EMULATE_CODEX_IDENTITY` | User agent string returned in `initialize` | `codex-app-server` |
+| `CODAPTER_DEBUG_LOG_FILE` | Path to JSONL debug log file | *(disabled)* |
+
+### Config Store
+
+The adapter maintains an in-memory config store that responds to `config/read` and `config/value/write` RPCs. Values persist for the lifetime of the adapter process but are **not saved to disk**. This keeps the Codex Desktop settings UI functional without interfering with backend configuration.
+
+### Pi Backend Configuration
+
+The Pi backend uses its own configuration at `~/.pi/agent/`:
+- **API keys**: `~/.pi/agent/auth.json`
+- **Sessions**: managed under `~/.local/share/codapter/backend-pi/`
+- **Model selection**: all models configured in Pi are exposed through `model/list`
+
+## Supported Codex RPC Methods
+
+### Fully Implemented
+
+| Method | Description |
+|--------|-------------|
+| `initialize` | Connection handshake with capabilities negotiation |
+| `thread/start` | Create new conversation thread |
+| `thread/resume` | Reconnect to existing thread |
+| `thread/fork` | Clone thread at current state |
+| `thread/read` | Read thread metadata and turn history |
+| `thread/list` | List threads with filtering and pagination |
+| `thread/loaded/list` | List currently loaded (active process) threads |
+| `thread/name/set` | Rename a thread |
+| `thread/archive` / `thread/unarchive` | Archive management |
+| `thread/metadata/update` | Update git info |
+| `thread/unsubscribe` | Stop notifications for a thread |
+| `turn/start` | Send user message, stream response |
+| `turn/interrupt` | Cancel in-progress turn |
+| `model/list` | List available models from backend |
+| `config/read` | Read adapter configuration |
+| `config/value/write` / `config/batchWrite` | Write configuration (in-memory) |
+| `configRequirements/read` | Returns null (no requirements) |
+| `getAuthStatus` / `account/read` | Returns null (no auth needed) |
+| `command/exec` | Execute shell commands (adapter-native) |
+| `command/exec/write` | Write to process stdin |
+| `command/exec/terminate` | Kill running process |
+| `skills/list` | Returns empty list |
+| `plugin/list` | Returns empty list |
+
+### Stubbed (Return Empty/Default)
+
+| Method | Response |
+|--------|----------|
+| `collaborationMode/list` | Empty list |
+| `experimentalFeature/list` | Empty list |
+| `mcpServerStatus/list` | Empty list |
+
+### Not Supported
+
+Any unrecognized method returns JSON-RPC error `-32601 Method not found`. This allows the GUI to gracefully degrade for features that don't have backend equivalents (sub-agents, MCP tools, worktrees, realtime voice, etc.).
+
+## Streaming Events
+
+Notifications emitted to the GUI during turns:
+
+| Notification | When |
+|-------------|------|
+| `thread/started` | New thread created |
+| `thread/status/changed` | Thread state transition |
+| `thread/name/updated` | Thread renamed |
+| `turn/started` | Turn begins |
+| `turn/completed` | Turn ends (completed / interrupted / failed) |
+| `item/started` | New ThreadItem begins (message, command, file change) |
+| `item/completed` | ThreadItem finished |
+| `item/agentMessage/delta` | Streamed text content |
+| `item/reasoning/summaryTextDelta` | Streamed thinking/reasoning content |
+| `item/commandExecution/outputDelta` | Streamed command output |
+| `item/fileChange/outputDelta` | Streamed file change content |
+| `command/exec/outputDelta` | Standalone shell output (not turn-related) |
+| `thread/tokenUsage/updated` | Token usage statistics |
+
+## Remote Setup
+
+### SSH Tunnel (WebSocket/TCP)
+
+```bash
+# On remote host:
+node /path/to/codapter.mjs app-server --listen ws://127.0.0.1:9234
+
+# From local machine:
+ssh -N -L 9234:127.0.0.1:9234 user@remote-host
+
+# Codex Desktop connects to ws://127.0.0.1:9234/rpc
+```
+
+### SSH Tunnel (Unix Domain Socket)
+
+For containerized environments where port publishing is impractical:
+
+```bash
+# In container:
+node /path/to/codapter.mjs app-server --listen unix://$HOME/.codex/adapter.sock
+
+# From local machine (streamlocal forward):
+ssh -N -L 127.0.0.1:9234:/home/user/workspace/.codex/adapter.sock user@host
+
+# Codex Desktop connects to ws://127.0.0.1:9234/rpc
+```
+
+### Persistent Remote Mode
+
+Run with `nohup` so the adapter survives SSH disconnects:
+
+```bash
+nohup node /path/to/codapter.mjs app-server \
+  --listen ws://127.0.0.1:9234 \
+  > /tmp/codapter.log 2>&1 &
+```
+
+The adapter stays alive with backend processes managed by idle timeouts. When Codex Desktop reconnects, it sends `thread/resume` and gets full history from the persistent session files.
+
+## Backend Interface
+
+Codapter is designed to support multiple backends through the `IBackend` interface. Pi is the first implementation.
+
+```mermaid
+classDiagram
+    class IBackend {
+        <<interface>>
+        +initialize(options) Promise~void~
+        +dispose() Promise~void~
+        +isAlive() boolean
+        +createSession(cwd) Promise~BackendSession~
+        +resumeSession(sessionId, cwd) Promise~BackendSession~
+        +forkSession(sessionId) Promise~BackendSession~
+        +disposeSession(sessionId) Promise~void~
+        +readSessionHistory(sessionId) Promise~BackendMessage[]~
+        +setSessionName(sessionId, name) Promise~void~
+        +prompt(sessionId, turnId, text, images?) Promise~void~
+        +abort(sessionId) Promise~void~
+        +listModels() Promise~BackendModelSummary[]~
+        +setModel(sessionId, modelId) Promise~void~
+        +onEvent(sessionId, listener) Disposable
+    }
+
+    class PiBackend {
+        -processes: Map
+        -stateStore: PiStateStore
+        +initialize(options)
+        +createSession(cwd)
+        +prompt(sessionId, turnId, text)
+        ...
+    }
+
+    IBackend <|.. PiBackend
+```
+
+To add a new backend, implement `IBackend` and register it in the CLI entry point. The core adapter handles all protocol translation, thread management, and streaming — the backend only needs to manage sessions and emit events.
+
+## Project Structure
+
+```
+codapter/
+├── packages/
+│   ├── core/                  # Protocol handling, state machines, transport
+│   │   └── src/
+│   │       ├── app-server.ts       # Main JSON-RPC handler
+│   │       ├── backend.ts          # IBackend interface & event types
+│   │       ├── turn-state.ts       # Turn state machine & event decomposition
+│   │       ├── thread-registry.ts  # Persistent thread storage
+│   │       ├── config-store.ts     # In-memory config
+│   │       ├── command-exec.ts     # Adapter-native shell execution
+│   │       ├── jsonrpc.ts          # JSON-RPC message types
+│   │       ├── ndjson.ts           # NDJSON framing
+│   │       └── protocol.ts         # Codex protocol type helpers
+│   ├── backend-pi/            # Pi backend implementation
+│   │   └── src/
+│   │       ├── index.ts            # PiBackend class
+│   │       ├── pi-process.ts       # Pi child process management
+│   │       ├── state-store.ts      # Session-to-file mapping
+│   │       └── jsonl.ts            # JSONL line reader
+│   └── cli/                   # CLI entry point & transports
+│       └── src/
+│           ├── index.ts            # Listener setup (stdio/WS/UDS)
+│           └── bin.ts              # Binary entry point
+├── dist/                      # Bundled distribution
+│   └── codapter.mjs               # Single-file ESM bundle
+├── docs/                      # Documentation
+│   ├── architecture.md
+│   ├── api-mapping.md
+│   ├── backend-interface.md
+│   ├── integration.md
+│   └── bootstrap/                  # Design & planning docs
+├── scripts/
+│   └── build-dist.mjs             # esbuild bundler
+├── test/                      # Smoke tests
+├── package.json
+├── tsconfig.base.json
+└── biome.json
+```
+
+## Development
+
+```bash
+# Install dependencies
+npm install
+
+# Build all packages
+npm run build
+
+# Run tests
+npm run test
+
+# Lint
+npm run lint
+
+# Full check (build + lint + test)
+npm run check
+
+# Build distribution binary
+npm run build:dist
+
+# Run smoke tests (requires Pi with API keys)
+PI_SMOKE_TEST=1 npm run test:smoke
+```
+
+## Debugging
+
+Enable debug logging to see all JSON-RPC traffic and backend events:
+
+```bash
+export CODAPTER_DEBUG_LOG_FILE=/tmp/codapter-debug.jsonl
+node dist/codapter.mjs app-server
+```
+
+The debug log captures:
+- All incoming/outgoing JSON-RPC messages
+- Backend events with timestamps
+- Pi process stdin/stdout traffic
+- Token usage parsing traces
+
+## Limitations
+
+- **No sub-agents**: Pi doesn't support collaborative/sub-agent workflows
+- **No MCP tools**: MCP server integration is not available through Pi
+- **No realtime/voice**: Pi has no voice API
+- **No worktree management**: Git worktree RPCs return method-not-found (planned as future adapter-native feature)
+- **No PTY mode**: `command/exec` with `tty: true` is rejected
+- **Single instance per state directory**: Multi-window concurrent writes to the thread registry are not locked in v0.1
+- **Config not persisted**: Settings changed through the GUI are lost when the adapter restarts
+
+## License
+
+See [LICENSE](LICENSE) for details.
