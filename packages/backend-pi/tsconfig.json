@@ -1,17 +1,9 @@
 {
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "lib": ["ES2022"],
-    "strict": true,
-    "composite": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
     "rootDir": "src",
     "outDir": "dist",
-    "skipLibCheck": true,
+    "tsBuildInfoFile": "./dist/.tsbuildinfo",
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true
   },

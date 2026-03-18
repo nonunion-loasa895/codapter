@@ -1,10 +1,12 @@
 {
-  "name": "@codapter/backend-pi",
+  "name": "@codapter/cli",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "codapter": "./dist/bin.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -12,9 +14,7 @@
     }
   },
   "files": ["dist"],
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "clean": "rm -rf dist",
-    "test": "tsc -p tsconfig.json --noEmit"
+  "dependencies": {
+    "@codapter/core": "0.1.0"
   }
 }

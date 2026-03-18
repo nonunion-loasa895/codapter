@@ -31,7 +31,7 @@ Before Milestone 1.1 begins, run a short read-only exploration pass to pin exter
 - [x] Main thread owns this checklist and `codex-protocol-analysis.md`
 - [x] Explorer agents write findings into the supporting docs above, not into the main checklist/spec
 - [x] Accepted findings are distilled back into the checklist/spec as concrete decisions or clarified milestones
-- [ ] Implementation starts only after the protocol source of truth is pinned locally and the exploration outputs are reviewed
+- [x] Implementation starts only after the protocol source of truth is pinned locally and the exploration outputs are reviewed
 
 ## Parallelization Tracks
 

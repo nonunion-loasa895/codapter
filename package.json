@@ -1,0 +1,30 @@
+{
+  "name": "codapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*"],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "build:dist": "node scripts/build-dist.mjs",
+    "check": "npm run build && npm run lint && npm run test",
+    "lint": "biome check .",
+    "prepare": "husky",
+    "test": "vitest run --passWithNoTests"
+  },
+  "lint-staged": {
+    "*.{js,mjs,cjs,ts,tsx,json,md}": ["biome check --write --no-errors-on-unmatched"]
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^22.13.10",
+    "esbuild": "^0.25.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.4.3",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.8"
+  }
+}

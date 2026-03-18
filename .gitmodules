@@ -1,0 +1,6 @@
+[submodule "upstream/codex"]
+	path = upstream/codex
+	url = ../codex
+[submodule "upstream/pi-mono"]
+	path = upstream/pi-mono
+	url = ../pi-mono
