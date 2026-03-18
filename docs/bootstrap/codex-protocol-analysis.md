@@ -643,6 +643,8 @@ Pi is a **TypeScript** agent system at `packages/coding-agent/`. Communication i
 | 40 | **Parallel tool demuxing** | Verify Pi event correlation | Confirm Pi's `tool_execution_update` events include tool call IDs for routing to correct concurrent Codex ThreadItems. If not, may need sequential tool execution. |
 | 41 | **Abort cleanup** | Adapter manually closes in-progress items | When Pi `abort` doesn't emit `tool_execution_end`/`message_end`, adapter must synthesize `item/completed` events for any open items before emitting `turn/completed(interrupted)`. |
 | 42 | **IBackend refinements** | Add missing methods from review feedback | Add: `disposeSession()`, `getCapabilities()`, `respondToElicitation()`. Use opaque `sessionId` not `sessionPath`. Add `turnId` to `prompt()` for event correlation. |
+| 43 | **UDS listener support** | `--listen unix:///path/to/adapter.sock` | WebSocket over Unix domain socket — same `/rpc` endpoint, same protocol. UDS lifecycle: create parent dir `0700`, remove stale socket, set `0600`, cleanup on shutdown. Enables SSH streamlocal tunneling to containerized environments without port publishing. |
+| 44 | **Listener env var** | `CODAPTER_LISTEN` | Alternative to `--listen` CLI flag. Comma-separated for multiple listeners (e.g., `ws://127.0.0.1:9234,unix:///path/to.sock`). Env var is overridden by explicit `--listen` flags. Falls back to stdio if neither is set. |
 
 ### Project Conventions (from agent-runner)
 

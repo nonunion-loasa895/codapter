@@ -86,14 +86,20 @@ After Milestone 1.1 (project scaffolding) is complete, work can split into paral
 ### 1.3 Transport Layer
 - [ ] Implement NDJSON framing: `parseNdjsonLine()`, `serializeNdjsonLine()`
 - [ ] Implement stdio transport: read stdin line-by-line, write to stdout
-- [ ] Implement WebSocket transport: `--listen ws://host:port` argument
-- [ ] Both transports share a common `ITransport` interface (send/receive messages)
+- [ ] Implement WebSocket transport (TCP): `--listen ws://host:port`
+- [ ] Implement WebSocket transport (UDS): `--listen unix:///path/to/adapter.sock`
+- [ ] UDS lifecycle: create parent dir (`0700`), remove stale socket on start, set socket `0600`, cleanup on shutdown
+- [ ] All transports share a common `ITransport` interface (send/receive messages)
+- [ ] Support multiple `--listen` flags (e.g., TCP + UDS simultaneously)
+- [ ] `CODAPTER_LISTEN` env var as alternative to `--listen` flag (comma-separated for multiple)
 - [ ] CLI entry point: accept `app-server` subcommand, `--listen` flag
 - [ ] Ignore `--analytics-default-enabled` flag gracefully
+- [ ] Fallback to stdio if no `--listen` and no `CODAPTER_LISTEN` set
 - [ ] Unit tests: NDJSON parsing (valid, malformed, empty lines, Unicode)
 - [ ] Unit tests: transport send/receive round-trip
+- [ ] Unit tests: UDS lifecycle (create, permissions, stale cleanup, non-socket exists → error)
 
-**Done when**: `codapter app-server` starts on stdio; `codapter app-server --listen ws://127.0.0.1:9234` starts WebSocket server.
+**Done when**: `codapter app-server` starts on stdio; `--listen ws://...` starts TCP WebSocket; `--listen unix://...` starts UDS WebSocket. All serve `/rpc` with same protocol.
 
 ### 1.4 Initialize Handshake
 - [ ] Parse `InitializeParams` from incoming request
