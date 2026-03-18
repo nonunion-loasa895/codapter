@@ -62,8 +62,12 @@ interface UpstreamSessionState {
 
 interface PiLogRecord {
   readonly at: string;
-  readonly kind: "stdin" | "stdout" | "stderr";
+  readonly kind: "stdin" | "stdout" | "stderr" | "parsed-event";
   readonly raw: string;
+  readonly eventType?: string;
+  readonly assistantEventType?: string;
+  readonly emittedType?: string;
+  readonly delta?: string;
 }
 
 class PiLogWriter {
@@ -627,37 +631,80 @@ export class PiProcessSession {
       ? event.assistantMessageEvent
       : undefined;
     if (!assistantEvent || typeof assistantEvent.type !== "string") {
+      this.logWriter?.write({
+        at: new Date().toISOString(),
+        kind: "parsed-event",
+        eventType: "message_update",
+        raw: JSON.stringify(event),
+      });
       return;
     }
 
     if (assistantEvent.type === "text_delta") {
+      const delta = String(assistantEvent.delta ?? "");
+      this.logWriter?.write({
+        at: new Date().toISOString(),
+        kind: "parsed-event",
+        eventType: "message_update",
+        assistantEventType: assistantEvent.type,
+        emittedType: "text_delta",
+        delta,
+        raw: JSON.stringify(event),
+      });
       this.emit({
         sessionId: this.opaqueSessionId,
         turnId: this.currentTurnId ?? "unknown",
         type: "text_delta",
-        delta: String(assistantEvent.delta ?? ""),
+        delta,
       });
       return;
     }
 
     if (assistantEvent.type === "thinking_delta") {
+      const delta = String(assistantEvent.delta ?? "");
+      this.logWriter?.write({
+        at: new Date().toISOString(),
+        kind: "parsed-event",
+        eventType: "message_update",
+        assistantEventType: assistantEvent.type,
+        emittedType: "thinking_delta",
+        delta,
+        raw: JSON.stringify(event),
+      });
       this.emit({
         sessionId: this.opaqueSessionId,
         turnId: this.currentTurnId ?? "unknown",
         type: "thinking_delta",
-        delta: String(assistantEvent.delta ?? ""),
+        delta,
       });
       return;
     }
 
     if (assistantEvent.type === "error") {
+      this.logWriter?.write({
+        at: new Date().toISOString(),
+        kind: "parsed-event",
+        eventType: "message_update",
+        assistantEventType: assistantEvent.type,
+        emittedType: "error",
+        raw: JSON.stringify(event),
+      });
       this.emit({
         sessionId: this.opaqueSessionId,
         turnId: this.currentTurnId ?? "unknown",
         type: "error",
         message: String(assistantEvent.errorMessage ?? "Pi assistant error"),
       });
+      return;
     }
+
+    this.logWriter?.write({
+      at: new Date().toISOString(),
+      kind: "parsed-event",
+      eventType: "message_update",
+      assistantEventType: assistantEvent.type,
+      raw: JSON.stringify(event),
+    });
   }
 
   private emitTokenUsage(turnId: string): void {

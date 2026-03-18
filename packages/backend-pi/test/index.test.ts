@@ -374,6 +374,13 @@ describe("PiBackend", () => {
         (record) => record.kind === "stdout" && record.raw.includes('"type":"message_update"')
       )
     ).toBe(true);
+    expect(
+      logRecords.some(
+        (record) =>
+          record.kind === "parsed-event" &&
+          record.raw.includes('"assistantMessageEvent":{"type":"text_delta"')
+      )
+    ).toBe(true);
 
     const reopened = createPiBackend({
       sessionDir,
