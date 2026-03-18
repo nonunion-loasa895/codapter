@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type {
   BackendCapabilities,
   BackendEvent,
@@ -8,61 +10,42 @@ import type {
   Disposable,
   IBackend,
 } from "@codapter/core";
+import {
+  type PiProcessLaunchOptions,
+  PiProcessSession,
+  type PiSessionStateSnapshot,
+  mapAvailableModelsToSummaries,
+  mapSessionRecordFromSnapshot,
+} from "./pi-process.js";
+import { type PiBackendSessionRecord, PiBackendStateStore } from "./state-store.js";
 
 export interface PiBackendOptions {
   readonly sessionDir?: string;
-  readonly models?: readonly BackendModelSummary[];
-  readonly capabilities?: Partial<BackendCapabilities>;
+  readonly command?: string;
+  readonly args?: readonly string[];
+  readonly env?: NodeJS.ProcessEnv;
+  readonly cwd?: string;
 }
 
-interface PiSessionState {
-  readonly sessionId: string;
-  readonly createdAt: string;
-  updatedAt: string;
-  name: string | null;
-  modelId: string | null;
-  disposed: boolean;
-  messages: BackendMessage[];
-  listeners: Set<(event: BackendEvent) => void>;
+interface ManagedSession {
+  readonly process: PiProcessSession;
+  record: PiBackendSessionRecord;
 }
-
-const DEFAULT_MODELS: readonly BackendModelSummary[] = [
-  {
-    id: "pi-default",
-    model: "pi-default",
-    displayName: "Pi Default",
-    description: "Default Pi backend placeholder model.",
-    hidden: false,
-    isDefault: true,
-    inputModalities: ["text"],
-    supportedReasoningEfforts: ["minimal", "medium"],
-    defaultReasoningEffort: "medium",
-    supportsPersonality: false,
-  },
-  {
-    id: "pi-fast",
-    model: "pi-fast",
-    displayName: "Pi Fast",
-    description: "Low-latency Pi backend placeholder model.",
-    hidden: false,
-    isDefault: false,
-    inputModalities: ["text"],
-    supportedReasoningEfforts: ["minimal"],
-    defaultReasoningEffort: "minimal",
-    supportsPersonality: false,
-  },
-];
 
 const DEFAULT_CAPABILITIES: BackendCapabilities = {
   requiresAuth: false,
-  supportsImages: false,
+  supportsImages: true,
   supportsThinking: true,
-  supportsParallelTools: false,
+  supportsParallelTools: true,
   supportedToolTypes: [],
 };
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function defaultSessionDir(): string {
+  return join(homedir(), ".local", "share", "codapter", "backend-pi");
 }
 
 function cloneMessage(message: BackendMessage): BackendMessage {
@@ -91,40 +74,66 @@ function cloneCapabilities(capabilities: BackendCapabilities): BackendCapabiliti
   };
 }
 
-function unsupportedOperation(operation: string): Error {
-  return new Error(`Pi backend scaffold does not implement ${operation} yet`);
+function opaqueSessionId(): string {
+  return `pi_session_${randomUUID()}`;
 }
 
 export class PiBackend implements IBackend {
-  public readonly sessionDir: string | undefined;
+  public readonly sessionDir: string;
 
-  private readonly models: BackendModelSummary[];
-  private readonly capabilities: BackendCapabilities;
-  private readonly sessions = new Map<string, PiSessionState>();
+  private readonly launchOptions: {
+    readonly command?: string;
+    readonly args?: readonly string[];
+    readonly env?: NodeJS.ProcessEnv;
+    readonly cwd?: string;
+  };
+  private readonly stateStore: PiBackendStateStore;
+  private readonly sessions = new Map<string, ManagedSession>();
+  private readonly modelCache = new Map<string, BackendModelSummary>();
   private initialized = false;
   private disposed = false;
-  private sessionCounter = 0;
-  private messageCounter = 0;
+  private capabilities: BackendCapabilities | null = null;
 
   constructor(options: PiBackendOptions = {}) {
-    this.sessionDir = options.sessionDir;
-    this.models = cloneModels(options.models ?? DEFAULT_MODELS);
-    this.capabilities = cloneCapabilities({
-      ...DEFAULT_CAPABILITIES,
-      ...options.capabilities,
-      supportedToolTypes:
-        options.capabilities?.supportedToolTypes ?? DEFAULT_CAPABILITIES.supportedToolTypes,
-    });
+    this.sessionDir = options.sessionDir ?? defaultSessionDir();
+    const launchOptions: {
+      command?: string;
+      args?: readonly string[];
+      env?: NodeJS.ProcessEnv;
+      cwd?: string;
+    } = {};
+    if (options.command !== undefined) {
+      launchOptions.command = options.command;
+    }
+    if (options.args !== undefined) {
+      launchOptions.args = options.args;
+    }
+    if (options.env !== undefined) {
+      launchOptions.env = options.env;
+    }
+    if (options.cwd !== undefined) {
+      launchOptions.cwd = options.cwd;
+    }
+    this.launchOptions = launchOptions;
+    this.stateStore = new PiBackendStateStore(this.sessionDir);
   }
 
   async initialize(): Promise<void> {
     this.assertNotDisposed();
+    await this.stateStore.load();
     this.initialized = true;
   }
 
   async dispose(): Promise<void> {
     this.disposed = true;
+
+    const disposals = Array.from(this.sessions.values(), async (session) => {
+      await session.process.dispose().catch(() => {});
+    });
+    await Promise.all(disposals);
+
     this.sessions.clear();
+    this.modelCache.clear();
   }
 
   isAlive(): boolean {
@@ -133,52 +142,88 @@ export class PiBackend implements IBackend {
 
   async createSession(): Promise<string> {
     this.assertReady();
-    const sessionId = this.allocateSessionId();
-    this.sessions.set(sessionId, this.createSessionState(sessionId));
+    const sessionId = opaqueSessionId();
+    const process = this.createProcess(sessionId);
+    const snapshot = await process.startFresh();
+    const record = await this.persistSnapshot(sessionId, snapshot);
+    this.sessions.set(sessionId, { process, record });
     return sessionId;
   }
 
   async resumeSession(sessionId: string): Promise<string> {
     this.assertReady();
-    this.getSessionOrThrow(sessionId);
+    await this.ensureActiveSession(sessionId);
     return sessionId;
   }
 
   async forkSession(sessionId: string): Promise<string> {
     this.assertReady();
-    const source = this.getSessionOrThrow(sessionId);
-    const forkedSessionId = this.allocateSessionId();
-    this.sessions.set(forkedSessionId, {
-      sessionId: forkedSessionId,
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
-      name: source.name,
-      modelId: source.modelId,
-      disposed: false,
-      messages: cloneMessages(source.messages),
-      listeners: new Set(),
-    });
+    const source = await this.ensureActiveSession(sessionId);
+    if (!source.record.sessionFile) {
+      throw new Error(`Pi session has no session file: ${sessionId}`);
+    }
+
+    const forkedSessionId = opaqueSessionId();
+    const process = this.createProcess(forkedSessionId);
+    await process.attachSession(source.record.sessionFile);
+
+    const anchors = await process.getForkMessages();
+    const entryId = anchors.at(-1)?.entryId;
+    if (!entryId) {
+      throw new Error(`Pi session has no fork anchor: ${sessionId}`);
+    }
+
+    const forkResult = await process.forkSession(entryId);
+    if (forkResult.cancelled) {
+      throw new Error(`Pi fork was cancelled for session ${sessionId}`);
+    }
+
+    const snapshot = await process.getState();
+    const record = await this.persistSnapshot(forkedSessionId, snapshot, source.record.createdAt);
+    this.sessions.set(forkedSessionId, { process, record });
     return forkedSessionId;
   }
 
   async disposeSession(sessionId: string): Promise<void> {
     this.assertReady();
-    const session = this.getSessionOrThrow(sessionId);
-    session.disposed = true;
-    session.listeners.clear();
-    this.sessions.delete(sessionId);
+    await this.requireRecord(sessionId);
+
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      await session.process.dispose().catch(() => {});
+      this.sessions.delete(sessionId);
+    }
   }
 
   async readSessionHistory(sessionId: string): Promise<BackendMessage[]> {
     this.assertReady();
-    return cloneMessages(this.getSessionOrThrow(sessionId).messages);
+    const session = this.sessions.get(sessionId);
+    if (session?.process.isRunning()) {
+      return cloneMessages(await session.process.getMessages());
+    }
+
+    const record = await this.requireRecord(sessionId);
+    if (!record.sessionFile) {
+      throw new Error(`Pi session has no session file: ${sessionId}`);
+    }
+
+    const reader = this.createProcess(`read:${sessionId}`);
+    try {
+      await reader.attachSession(record.sessionFile);
+      return cloneMessages(await reader.getMessages());
+    } finally {
+      await reader.dispose().catch(() => {});
+    }
   }
 
   async setSessionName(sessionId: string, name: string): Promise<void> {
     this.assertReady();
-    const session = this.getSessionOrThrow(sessionId);
-    session.name = name;
-    session.updatedAt = nowIso();
+    const session = await this.ensureActiveSession(sessionId);
+    await session.process.setSessionName(name);
+    session.record = await this.updateRecord(sessionId, {
+      sessionName: name,
+      updatedAt: nowIso(),
+    });
   }
 
   async prompt(
@@ -188,34 +233,58 @@ export class PiBackend implements IBackend {
     images?: readonly BackendImageInput[]
   ): Promise<void> {
     this.assertReady();
-    this.getSessionOrThrow(sessionId);
-    void turnId;
-    void text;
-    void images;
-    throw unsupportedOperation("prompt");
+    const session = await this.ensureActiveSession(sessionId);
+    await session.process.prompt(turnId, text, images);
+    session.record = await this.updateRecord(sessionId, {
+      updatedAt: nowIso(),
+    });
   }
 
   async abort(sessionId: string): Promise<void> {
     this.assertReady();
-    this.getSessionOrThrow(sessionId);
-    throw unsupportedOperation("abort");
+    const session = await this.ensureActiveSession(sessionId);
+    await session.process.abort();
+    session.record = await this.updateRecord(sessionId, {
+      updatedAt: nowIso(),
+    });
   }
 
   async listModels(): Promise<BackendModelSummary[]> {
     this.assertReady();
-    return cloneModels(this.models);
+    if (this.modelCache.size > 0) {
+      return cloneModels([...this.modelCache.values()]);
+    }
+
+    const probe = this.createProcess(`models:${randomUUID()}`);
+    try {
+      const models = await probe.getAvailableModels();
+      const summaries = mapAvailableModelsToSummaries(models);
+      this.modelCache.clear();
+      for (const model of summaries) {
+        this.modelCache.set(model.id, model);
+      }
+      return cloneModels(summaries);
+    } finally {
+      await probe.dispose().catch(() => {});
+    }
   }
 
   async setModel(sessionId: string, modelId: string): Promise<void> {
     this.assertReady();
-    const session = this.getSessionOrThrow(sessionId);
-    this.ensureModelExists(modelId);
-    session.modelId = modelId;
-    session.updatedAt = nowIso();
+    const session = await this.ensureActiveSession(sessionId);
+    const model = await this.resolveModel(modelId);
+    await session.process.setModel(model.provider, model.modelId);
+    session.record = await this.updateRecord(sessionId, {
+      modelId: model.id,
+      updatedAt: nowIso(),
+    });
   }
 
   async getCapabilities(): Promise<BackendCapabilities> {
     this.assertReady();
+    if (!this.capabilities) {
+      this.capabilities = cloneCapabilities(DEFAULT_CAPABILITIES);
+    }
     return cloneCapabilities(this.capabilities);
   }
 
@@ -225,22 +294,38 @@ export class PiBackend implements IBackend {
     response: unknown
   ): Promise<void> {
     this.assertReady();
-    this.getSessionOrThrow(sessionId);
-    void requestId;
-    void response;
-    throw unsupportedOperation("respondToElicitation");
+    const session = await this.ensureActiveSession(sessionId);
+    await session.process.respondToElicitation(requestId, response);
+    session.record = await this.updateRecord(sessionId, {
+      updatedAt: nowIso(),
+    });
   }
 
   onEvent(sessionId: string, listener: (event: BackendEvent) => void): Disposable {
     this.assertReady();
-    const session = this.getSessionOrThrow(sessionId);
-    session.listeners.add(listener);
+    const session = this.sessions.get(sessionId);
+    if (session?.process.isRunning()) {
+      return session.process.addListener(listener);
+    }
 
-    return {
-      dispose: () => {
-        session.listeners.delete(listener);
+    let disposed = false;
+    let listenerDisposable: Disposable | null = null;
+    const disposable: Disposable = {
+      dispose(): void {
+        disposed = true;
+        listenerDisposable?.dispose();
       },
     };
+
+    void this.ensureActiveSession(sessionId).then((active) => {
+      if (!disposed) {
+        listenerDisposable = active.process.addListener(listener);
+      } else {
+        listenerDisposable?.dispose();
+      }
+    });
+
+    return disposable;
   }
 
   private assertNotDisposed(): void {
@@ -256,42 +341,83 @@ export class PiBackend implements IBackend {
     }
   }
 
-  private allocateSessionId(): string {
-    this.sessionCounter += 1;
-    return `pi_session_${this.sessionCounter}_${randomUUID()}`;
+  private createProcess(sessionId: string): PiProcessSession {
+    return new PiProcessSession({
+      sessionDir: this.sessionDir,
+      opaqueSessionId: sessionId,
+      ...this.launchOptions,
+    });
   }
 
-  private allocateMessageId(): string {
-    this.messageCounter += 1;
-    return `pi_message_${this.messageCounter}_${randomUUID()}`;
-  }
-
-  private createSessionState(sessionId: string): PiSessionState {
-    const createdAt = nowIso();
-    return {
-      sessionId,
-      createdAt,
-      updatedAt: createdAt,
-      name: null,
-      modelId: this.models.find((model) => model.isDefault)?.id ?? null,
-      disposed: false,
-      messages: [],
-      listeners: new Set(),
-    };
-  }
-
-  private getSessionOrThrow(sessionId: string): PiSessionState {
-    const session = this.sessions.get(sessionId);
-    if (!session || session.disposed) {
-      throw new Error(`Unknown Pi session: ${sessionId}`);
+  private async ensureActiveSession(sessionId: string): Promise<ManagedSession> {
+    const existing = this.sessions.get(sessionId);
+    if (existing?.process.isRunning()) {
+      return existing;
     }
+
+    if (existing) {
+      await existing.process.dispose().catch(() => {});
+      this.sessions.delete(sessionId);
+    }
+
+    const record = await this.requireRecord(sessionId);
+    if (!record.sessionFile) {
+      throw new Error(`Pi session has no session file: ${sessionId}`);
+    }
+
+    const process = this.createProcess(sessionId);
+    await process.attachSession(record.sessionFile);
+    const snapshot = await process.getState();
+    const nextRecord = await this.persistSnapshot(sessionId, snapshot, record.createdAt);
+    const session = { process, record: nextRecord };
+    this.sessions.set(sessionId, session);
     return session;
   }
 
-  private ensureModelExists(modelId: string): void {
-    if (!this.models.some((model) => model.id === modelId)) {
+  private async requireRecord(sessionId: string): Promise<PiBackendSessionRecord> {
+    const record = await this.stateStore.get(sessionId);
+    if (!record) {
+      throw new Error(`Unknown Pi session: ${sessionId}`);
+    }
+    return record;
+  }
+
+  private async persistSnapshot(
+    sessionId: string,
+    snapshot: PiSessionStateSnapshot,
+    createdAt?: string
+  ): Promise<PiBackendSessionRecord> {
+    const record = mapSessionRecordFromSnapshot(sessionId, snapshot, createdAt ?? nowIso());
+    await this.stateStore.upsert(record);
+    return record;
+  }
+
+  private async updateRecord(
+    sessionId: string,
+    patch: Partial<Omit<PiBackendSessionRecord, "opaqueSessionId" | "createdAt">>
+  ): Promise<PiBackendSessionRecord> {
+    return await this.stateStore.update(sessionId, patch);
+  }
+
+  private async resolveModel(
+    modelId: string
+  ): Promise<{ id: string; provider: string; modelId: string }> {
+    if (this.modelCache.size === 0) {
+      await this.listModels();
+    }
+
+    const model = this.modelCache.get(modelId);
+    if (!model) {
       throw new Error(`Unknown Pi model: ${modelId}`);
     }
+
+    const provider = model.model.split("/")[0] ?? "";
+    const rawModelId = model.model.split("/")[1] ?? model.model;
+    return {
+      id: model.id,
+      provider,
+      modelId: rawModelId,
+    };
   }
 }
 
