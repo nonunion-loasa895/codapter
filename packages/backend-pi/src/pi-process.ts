@@ -144,13 +144,70 @@ function parseModelKey(modelId: string): { provider: string; id: string } {
 
 function mapTokenUsage(stats: unknown): BackendTokenUsage {
   const record = isRecord(stats) ? stats : {};
-  const tokens = isRecord(record.tokens) ? record.tokens : {};
+  const tokens = isRecord(record.tokens)
+    ? record.tokens
+    : isRecord(record.tokenUsage)
+      ? record.tokenUsage
+      : isRecord((record as { token_usage?: unknown }).token_usage)
+        ? ((record as { token_usage?: unknown }).token_usage as Record<string, unknown>)
+        : isRecord((record as { statistics?: unknown }).statistics)
+          ? ((record as { statistics?: unknown }).statistics as Record<string, unknown>)
+          : {};
+
+  const parseCount = (value: unknown): number => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === "string" && value.trim().length > 0) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+    return 0;
+  };
+
+  const toTokenCount = (primary: unknown, ...fallbacks: unknown[]) => {
+    const fallbackKeys = [primary, ...fallbacks];
+    for (const value of fallbackKeys) {
+      const parsed = parseCount(value);
+      if (parsed !== 0 || value === 0) {
+        return parsed;
+      }
+    }
+    return 0;
+  };
+
+  const inputTokens = toTokenCount(
+    tokens.input,
+    (tokens as { inputTokens?: unknown }).inputTokens,
+    (tokens as { input_tokens?: unknown }).input_tokens
+  );
+  const outputTokens = toTokenCount(
+    tokens.output,
+    (tokens as { outputTokens?: unknown }).outputTokens,
+    (tokens as { output_tokens?: unknown }).output_tokens
+  );
+  const cacheRead = toTokenCount(
+    tokens.cacheRead,
+    (tokens as { cachedInputTokens?: unknown }).cachedInputTokens,
+    (tokens as { cache_read?: unknown }).cache_read
+  );
+  const cacheWrite = toTokenCount(
+    tokens.cacheWrite,
+    (tokens as { cachedOutputTokens?: unknown }).cachedOutputTokens,
+    (tokens as { cache_write?: unknown }).cache_write
+  );
+  const totalTokens = toTokenCount(
+    tokens.total,
+    (tokens as { totalTokens?: unknown }).totalTokens,
+    (tokens as { total_tokens?: unknown }).total_tokens
+  );
+
   return {
-    input: Number(tokens.input ?? 0),
-    output: Number(tokens.output ?? 0),
-    cacheRead: Number(tokens.cacheRead ?? 0),
-    cacheWrite: Number(tokens.cacheWrite ?? 0),
-    total: Number(tokens.total ?? 0),
+    input: inputTokens,
+    output: outputTokens,
+    cacheRead,
+    cacheWrite,
+    total: totalTokens,
   };
 }
 
@@ -208,6 +265,13 @@ function mapMessage(message: unknown, index: number): BackendMessage {
         : structuredClone(record),
     createdAt: timestamp,
   };
+}
+
+function messageRole(message: unknown): string | null {
+  if (!isRecord(message) || typeof message.role !== "string") {
+    return null;
+  }
+  return message.role;
 }
 
 function toImageContent(
@@ -586,6 +650,9 @@ export class PiProcessSession {
         this.emitMessageUpdate(event);
         return;
       case "message_end":
+        if (messageRole(event.message) !== "assistant") {
+          return;
+        }
         this.emit({
           sessionId: this.opaqueSessionId,
           turnId: this.currentTurnId ?? "unknown",
