@@ -22,6 +22,8 @@ import {
   success,
 } from "./jsonrpc.js";
 import type {
+  AppListResponse,
+  CollaborationModeListResponse,
   CommandExecParams,
   CommandExecResizeParams,
   CommandExecResponse,
@@ -33,12 +35,14 @@ import type {
   ConfigRequirementsReadResponse,
   ConfigValueWriteParams,
   ConfigWriteResponse,
+  ExperimentalFeatureListResponse,
   GetAccountParams,
   GetAccountResponse,
   GetAuthStatusResponse,
   GitInfo,
   InitializeParams,
   InitializeResponse,
+  McpServerStatusListResponse,
   ModelListResponse,
   PluginListResponse,
   SkillsListResponse,
@@ -494,8 +498,16 @@ export class AppServerConnection {
           return success(request.id, this.handleSkillsList());
         case "plugin/list":
           return success(request.id, this.handlePluginList());
+        case "app/list":
+          return success(request.id, this.handleAppList(request.params));
         case "model/list":
           return success(request.id, await this.handleModelList());
+        case "experimentalFeature/list":
+          return success(request.id, this.handleExperimentalFeatureList(request.params));
+        case "collaborationMode/list":
+          return success(request.id, this.handleCollaborationModeList());
+        case "mcpServerStatus/list":
+          return success(request.id, this.handleMcpServerStatusList(request.params));
         case "thread/start":
           return success(request.id, await this.handleThreadStart(request.params));
         case "thread/resume":
@@ -739,6 +751,33 @@ export class AppServerConnection {
     return {
       marketplaces: [],
       remoteSyncError: null,
+    };
+  }
+
+  private handleAppList(_params: unknown): AppListResponse {
+    return {
+      data: [],
+      nextCursor: null,
+    };
+  }
+
+  private handleExperimentalFeatureList(_params: unknown): ExperimentalFeatureListResponse {
+    return {
+      data: [],
+      nextCursor: null,
+    };
+  }
+
+  private handleCollaborationModeList(): CollaborationModeListResponse {
+    return {
+      data: [],
+    };
+  }
+
+  private handleMcpServerStatusList(_params: unknown): McpServerStatusListResponse {
+    return {
+      data: [],
+      nextCursor: null,
     };
   }
 

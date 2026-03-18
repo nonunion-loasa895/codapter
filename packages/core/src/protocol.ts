@@ -175,6 +175,59 @@ export type PluginListResponse = {
   remoteSyncError: string | null;
 };
 
+export type AppListParams = {
+  cursor?: string | null;
+  limit?: number | null;
+  threadId?: string | null;
+  forceRefetch?: boolean;
+};
+
+export type AppListResponse = {
+  data: JsonValue[];
+  nextCursor: string | null;
+};
+
+export type CollaborationModeMask = {
+  name: string;
+  mode: string | null;
+  model: string | null;
+  reasoning_effort: string | null;
+};
+
+export type CollaborationModeListResponse = {
+  data: CollaborationModeMask[];
+};
+
+export type ExperimentalFeatureListParams = {
+  cursor?: string | null;
+  limit?: number | null;
+};
+
+export type ExperimentalFeature = {
+  name: string;
+  stage: string;
+  displayName: string | null;
+  description: string | null;
+  announcement: string | null;
+  enabled: boolean;
+  defaultEnabled: boolean;
+};
+
+export type ExperimentalFeatureListResponse = {
+  data: ExperimentalFeature[];
+  nextCursor: string | null;
+};
+
+export type McpServerStatusListParams = {
+  cursor?: string | null;
+  limit?: number | null;
+};
+
+export type McpServerStatusListResponse = {
+  data: JsonValue[];
+  nextCursor: string | null;
+};
+
 export type Model = {
   id: string;
   model: string;

@@ -78,6 +78,14 @@ function opaqueSessionId(): string {
   return `pi_session_${randomUUID()}`;
 }
 
+function toRequestedModelCandidates(modelId: string): string[] {
+  if (modelId.includes("/")) {
+    return [modelId];
+  }
+
+  return [modelId, `openai-codex/${modelId}`];
+}
+
 export class PiBackend implements IBackend {
   public readonly sessionDir: string;
 
@@ -406,7 +414,9 @@ export class PiBackend implements IBackend {
       await this.listModels();
     }
 
-    const model = this.modelCache.get(modelId);
+    const model = toRequestedModelCandidates(modelId)
+      .map((candidate) => this.modelCache.get(candidate))
+      .find((candidate) => candidate !== undefined);
     if (!model) {
       throw new Error(`Unknown Pi model: ${modelId}`);
     }

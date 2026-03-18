@@ -29,6 +29,7 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "const availableModels = [",
     "  { provider: 'pi', id: 'mock-default', name: 'Mock Default', reasoning: true, input: ['text', 'image'] },",
     "  { provider: 'pi', id: 'mock-fast', name: 'Mock Fast', reasoning: false, input: ['text'] },",
+    "  { provider: 'openai-codex', id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', reasoning: true, input: ['text', 'image'] },",
     "];",
     "",
     "function write(value) {",
@@ -283,7 +284,7 @@ describe("PiBackend", () => {
     await backend.initialize();
 
     const models = await backend.listModels();
-    expect(models).toHaveLength(2);
+    expect(models).toHaveLength(3);
     expect(models[0]?.isDefault).toBe(true);
     expect(models[0]?.id).toBe("pi/mock-default");
 
@@ -311,6 +312,7 @@ describe("PiBackend", () => {
 
     await backend.setSessionName(sessionId, "Primary session");
     await backend.setModel(sessionId, selectedModel.id);
+    await backend.setModel(sessionId, "gpt-5.3-codex");
     await backend.prompt(sessionId, "turn_1", "hello world", [
       {
         type: "image",

@@ -291,6 +291,73 @@ describe("AppServerConnection", () => {
     });
   });
 
+  it("returns empty startup list responses for desktop compatibility", async () => {
+    const connection = new AppServerConnection({ backend: createBackend() });
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    await expect(
+      connection.handleMessage({
+        id: 2,
+        method: "app/list",
+        params: {},
+      })
+    ).resolves.toEqual({
+      id: 2,
+      result: {
+        data: [],
+        nextCursor: null,
+      },
+    });
+
+    await expect(
+      connection.handleMessage({
+        id: 3,
+        method: "experimentalFeature/list",
+        params: {},
+      })
+    ).resolves.toEqual({
+      id: 3,
+      result: {
+        data: [],
+        nextCursor: null,
+      },
+    });
+
+    await expect(
+      connection.handleMessage({
+        id: 4,
+        method: "collaborationMode/list",
+        params: {},
+      })
+    ).resolves.toEqual({
+      id: 4,
+      result: {
+        data: [],
+      },
+    });
+
+    await expect(
+      connection.handleMessage({
+        id: 5,
+        method: "mcpServerStatus/list",
+        params: {},
+      })
+    ).resolves.toEqual({
+      id: 5,
+      result: {
+        data: [],
+        nextCursor: null,
+      },
+    });
+  });
+
   it("returns method-not-found and logs unrecognized methods", async () => {
     const warn = vi.fn();
     const connection = new AppServerConnection({ logger: { warn } });
