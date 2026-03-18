@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { appendFile, mkdir } from "node:fs/promises";
 import { validateHeaderValue } from "node:http";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import type {
   BackendEvent,
   BackendImageInput,
@@ -121,6 +122,7 @@ export interface AppServerConnectionOptions {
   readonly configStore?: InMemoryConfigStore;
   readonly identity?: AppServerIdentity;
   readonly logger?: AppServerLogger;
+  readonly upstreamLogFilePath?: string | null;
   readonly threadRegistry?: ThreadRegistry;
   readonly onMessage?: (message: AppServerOutgoingMessage) => void | Promise<void>;
 }
@@ -199,6 +201,57 @@ function defaultLogger(): AppServerLogger {
       console.warn(message);
     },
   };
+}
+
+interface UpstreamLogRecord {
+  readonly at: string;
+  readonly kind: string;
+  readonly threadId?: string;
+  readonly turnId?: string;
+  readonly accepted?: boolean;
+  readonly method?: string;
+  readonly eventType?: string;
+  readonly payload?: unknown;
+}
+
+class UpstreamLogWriter {
+  private pending: Promise<void> = Promise.resolve();
+  private failed = false;
+
+  constructor(
+    private readonly filePath: string,
+    private readonly logger: AppServerLogger
+  ) {}
+
+  async write(record: UpstreamLogRecord): Promise<void> {
+    if (this.failed) {
+      return;
+    }
+
+    const line = `${JSON.stringify(record)}\n`;
+    this.pending = this.pending.then(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true });
+      await appendFile(this.filePath, line, "utf8");
+    });
+
+    try {
+      await this.pending;
+    } catch (error) {
+      this.failed = true;
+      this.logger.warn("Failed to write upstream event log", {
+        filePath: this.filePath,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  async flush(): Promise<void> {
+    try {
+      await this.pending;
+    } catch {
+      // The logger already reported the failure path.
+    }
+  }
 }
 
 function truncateForLog(value: unknown, limit = 240): string {
@@ -412,6 +465,7 @@ export class AppServerConnection {
   private readonly configStore: InMemoryConfigStore;
   private readonly identity: AppServerIdentity;
   private readonly logger: AppServerLogger;
+  private readonly upstreamLogWriter: UpstreamLogWriter | null;
   private readonly threadRegistry: ThreadRegistry;
   private readonly onMessage:
     | ((message: AppServerOutgoingMessage) => void | Promise<void>)
@@ -435,6 +489,12 @@ export class AppServerConnection {
     this.configStore = options.configStore ?? new InMemoryConfigStore();
     this.identity = options.identity ?? createIdentity();
     this.logger = options.logger ?? defaultLogger();
+    const upstreamLogFilePath =
+      options.upstreamLogFilePath ?? process.env.CODAPTER_UPSTREAM_LOG_FILE ?? null;
+    this.upstreamLogWriter =
+      upstreamLogFilePath && upstreamLogFilePath.length > 0
+        ? new UpstreamLogWriter(upstreamLogFilePath, this.logger)
+        : null;
     this.threadRegistry =
       options.threadRegistry ?? new ThreadRegistry(undefined, this.logger as ThreadRegistryLogger);
     this.onMessage = options.onMessage;
@@ -455,6 +515,7 @@ export class AppServerConnection {
     this.pendingToolUserInputRequests.clear();
     this.threadRuntimes.clear();
     await this.commandExecManager.dispose();
+    await this.upstreamLogWriter?.flush();
   }
 
   async handleMessage(message: unknown): Promise<JsonRpcResponse | null> {
@@ -610,6 +671,13 @@ export class AppServerConnection {
 
     const notification = this.emitNotification(method, params);
     if (notification) {
+      await this.upstreamLogWriter?.write({
+        at: new Date().toISOString(),
+        kind: "notification",
+        threadId,
+        method,
+        payload: params,
+      });
       await this.send(notification);
     }
   }
@@ -1113,12 +1181,23 @@ export class AppServerConnection {
     event: BackendEvent
   ): Promise<void> {
     const runtime = this.threadRuntimes.get(threadId);
-    if (
-      !runtime ||
-      runtime.activeTurnId !== turnId ||
-      !runtime.machine ||
-      event.turnId !== turnId
-    ) {
+    const accepted =
+      Boolean(runtime) &&
+      runtime.activeTurnId === turnId &&
+      Boolean(runtime.machine) &&
+      event.turnId === turnId;
+
+    await this.upstreamLogWriter?.write({
+      at: new Date().toISOString(),
+      kind: "backend-event",
+      threadId,
+      turnId,
+      accepted,
+      eventType: event.type,
+      payload: event,
+    });
+
+    if (!accepted || !runtime) {
       return;
     }
 

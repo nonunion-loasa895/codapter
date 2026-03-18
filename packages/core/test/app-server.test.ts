@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -698,6 +698,83 @@ describe("AppServerConnection", () => {
     expect(
       notifications.some((notification) => notification.method === "command/exec/outputDelta")
     ).toBe(true);
+  });
+
+  it("writes upstream backend events and emitted notifications to a file log", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-upstream-log-"));
+    const logFilePath = join(directory, "upstream.jsonl");
+    const backend = new TestBackend(async ({ sessionId, turnId }) => {
+      queueMicrotask(() => {
+        backend.emit(sessionId, {
+          type: "text_delta",
+          sessionId,
+          turnId,
+          delta: "hello from pi",
+        });
+        backend.emit(sessionId, {
+          type: "message_end",
+          sessionId,
+          turnId,
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      upstreamLogFilePath: logFilePath,
+      onMessage() {},
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+      const threadId = started.result.thread.id;
+
+      await connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId,
+          input: [{ type: "text", text: "hello", text_elements: [] }],
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const lines = (await readFile(logFilePath, "utf8")).trim().split("\n");
+      const records = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+
+      expect(
+        records.some(
+          (record) =>
+            record.kind === "backend-event" &&
+            record.eventType === "text_delta" &&
+            record.accepted === true
+        )
+      ).toBe(true);
+      expect(
+        records.some(
+          (record) => record.kind === "notification" && record.method === "item/agentMessage/delta"
+        )
+      ).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("rejects unsupported tty command execution", async () => {
