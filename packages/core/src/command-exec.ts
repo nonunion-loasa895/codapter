@@ -1,8 +1,6 @@
 import { Buffer } from "node:buffer";
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import type { IPty } from "node-pty";
-import * as pty from "node-pty";
 import type {
   CommandExecParams,
   CommandExecResizeParams,
@@ -27,25 +25,13 @@ export interface CommandExecManagerOptions {
   readonly onNotification?: (notification: CommandExecNotification) => void | Promise<void>;
 }
 
-type RunningCommand = BufferedCommand | PtyCommand;
-
-interface CommandBase {
+interface RunningCommand {
   readonly processId: string;
-  readonly tty: boolean;
   readonly streamStdin: boolean;
   readonly streamStdoutStderr: boolean;
+  readonly child: ChildProcessWithoutNullStreams;
   readonly close: () => Promise<void>;
   readonly waitForExit: Promise<CommandExecResponse>;
-}
-
-interface BufferedCommand extends CommandBase {
-  readonly tty: false;
-  readonly child: ChildProcessWithoutNullStreams;
-}
-
-interface PtyCommand extends CommandBase {
-  readonly tty: true;
-  readonly ptyProcess: IPty;
 }
 
 function mergeEnvironment(overrides: CommandExecParams["env"]): Record<string, string> {
@@ -110,6 +96,9 @@ export class CommandExecManager {
     if (params.command.length === 0) {
       throw new Error("command/exec requires a non-empty command array");
     }
+    if (params.tty === true) {
+      throw new Error("TTY command/exec requests are not supported");
+    }
     if (
       params.disableOutputCap &&
       params.outputBytesCap !== undefined &&
@@ -121,27 +110,20 @@ export class CommandExecManager {
       throw new Error("disableTimeout cannot be combined with timeoutMs");
     }
 
-    const tty = params.tty === true;
-    const streamStdin = tty || params.streamStdin === true;
-    const streamStdoutStderr = tty || params.streamStdoutStderr === true;
-    const processId =
-      params.processId ?? (tty || streamStdin || streamStdoutStderr ? null : randomUUID());
+    const streamStdin = params.streamStdin === true;
+    const streamStdoutStderr = params.streamStdoutStderr === true;
+    const processId = params.processId ?? (streamStdin || streamStdoutStderr ? null : randomUUID());
 
-    if ((tty || streamStdin || streamStdoutStderr) && !processId) {
-      throw new Error("processId is required for tty or streaming command/exec requests");
-    }
-    if (tty && !params.size) {
-      throw new Error("TTY command/exec requests require an initial terminal size");
+    if ((streamStdin || streamStdoutStderr) && !processId) {
+      throw new Error("processId is required for streaming command/exec requests");
     }
 
-    const command = tty
-      ? await this.startPtyCommand(params, processId as string, streamStdoutStderr)
-      : await this.startBufferedCommand(
-          params,
-          processId as string | null,
-          streamStdin,
-          streamStdoutStderr
-        );
+    const command = await this.startBufferedCommand(
+      params,
+      processId as string | null,
+      streamStdin,
+      streamStdoutStderr
+    );
 
     if (processId) {
       this.processes.set(processId, command);
@@ -162,16 +144,6 @@ export class CommandExecManager {
       throw new Error(`command/exec process ${params.processId} does not accept stdin writes`);
     }
 
-    if (command.tty) {
-      if (params.deltaBase64) {
-        command.ptyProcess.write(Buffer.from(params.deltaBase64, "base64").toString("utf8"));
-      }
-      if (params.closeStdin) {
-        command.ptyProcess.kill();
-      }
-      return;
-    }
-
     if (params.deltaBase64) {
       command.child.stdin.write(Buffer.from(params.deltaBase64, "base64"));
     }
@@ -180,12 +152,8 @@ export class CommandExecManager {
     }
   }
 
-  async resize(params: CommandExecResizeParams): Promise<void> {
-    const command = this.getCommand(params.processId);
-    if (!command.tty) {
-      throw new Error(`command/exec process ${params.processId} is not PTY-backed`);
-    }
-    command.ptyProcess.resize(params.size.cols, params.size.rows);
+  async resize(_params: CommandExecResizeParams): Promise<void> {
+    throw new Error("TTY resize is not supported");
   }
 
   async terminate(params: CommandExecTerminateParams): Promise<void> {
@@ -211,7 +179,7 @@ export class CommandExecManager {
     processId: string | null,
     streamStdin: boolean,
     streamStdoutStderr: boolean
-  ): Promise<BufferedCommand> {
+  ): Promise<RunningCommand> {
     const env = mergeEnvironment(params.env);
     const child = spawn(params.command[0], params.command.slice(1), {
       cwd: params.cwd ?? process.cwd(),
@@ -279,7 +247,6 @@ export class CommandExecManager {
 
     return {
       processId: processId ?? randomUUID(),
-      tty: false,
       streamStdin,
       streamStdoutStderr,
       child,
@@ -287,58 +254,6 @@ export class CommandExecManager {
         if (!child.killed) {
           child.kill("SIGTERM");
         }
-      },
-      waitForExit,
-    };
-  }
-
-  private async startPtyCommand(
-    params: CommandExecParams,
-    processId: string,
-    streamStdoutStderr: boolean
-  ): Promise<PtyCommand> {
-    const env = mergeEnvironment(params.env);
-    const ptyProcess = pty.spawn(params.command[0], params.command.slice(1), {
-      cols: params.size?.cols ?? 80,
-      rows: params.size?.rows ?? 24,
-      cwd: params.cwd ?? process.cwd(),
-      env,
-      name: "xterm-256color",
-    });
-
-    const stdout = createOutputCollector(null);
-    const waitForExit = new Promise<CommandExecResponse>((resolve) => {
-      ptyProcess.onData((data) => {
-        stdout.append(data);
-        if (streamStdoutStderr) {
-          void this.notify({
-            method: "command/exec/outputDelta",
-            params: {
-              processId,
-              stream: "stdout",
-              deltaBase64: Buffer.from(data, "utf8").toString("base64"),
-              capReached: false,
-            },
-          });
-        }
-      });
-      ptyProcess.onExit(({ exitCode }) => {
-        resolve({
-          exitCode,
-          stdout: streamStdoutStderr ? "" : stdout.text,
-          stderr: "",
-        });
-      });
-    });
-
-    return {
-      processId,
-      tty: true,
-      streamStdin: true,
-      streamStdoutStderr,
-      ptyProcess,
-      async close() {
-        ptyProcess.kill();
       },
       waitForExit,
     };

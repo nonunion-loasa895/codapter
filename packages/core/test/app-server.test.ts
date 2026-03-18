@@ -633,6 +633,38 @@ describe("AppServerConnection", () => {
     ).toBe(true);
   });
 
+  it("rejects unsupported tty command execution", async () => {
+    const connection = new AppServerConnection();
+
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    await expect(
+      connection.handleMessage({
+        id: 2,
+        method: "command/exec",
+        params: {
+          command: ["bash"],
+          tty: true,
+          processId: "tty_proc",
+          size: { cols: 80, rows: 24 },
+        },
+      })
+    ).resolves.toEqual({
+      id: 2,
+      error: {
+        code: -32603,
+        message: "TTY command/exec requests are not supported",
+      },
+    });
+  });
+
   it("round-trips Pi elicitation through item/tool/requestUserInput", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
     const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));

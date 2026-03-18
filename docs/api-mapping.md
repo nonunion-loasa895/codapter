@@ -95,16 +95,17 @@ Status:
 
 | Codex concept | Current codapter mapping | Notes |
 | --- | --- | --- |
-| `command/exec` | `CommandExecManager.execute()` in `packages/core/src/command-exec.ts` | Uses `child_process.spawn` for buffered mode and `node-pty` for PTY mode. |
+| `command/exec` | `CommandExecManager.execute()` in `packages/core/src/command-exec.ts` | Uses `child_process.spawn` for buffered and streamed pipe mode. |
 | `command/exec/write` | `CommandExecManager.write()` | Writes stdin to the tracked process. |
-| `command/exec/resize` | `CommandExecManager.resize()` | Resizes PTY-backed processes. |
+| `command/exec/resize` | `CommandExecManager.resize()` | Returns an unsupported error in v0.1 because PTY mode is not implemented. |
 | `command/exec/terminate` | `CommandExecManager.terminate()` | Terminates the tracked process. |
 | `command/exec/outputDelta` | Published by `CommandExecManager` | Base64 chunks are emitted per stream and process. |
 
 Behavior notes:
 - Buffered execution returns a final `{ exitCode, stdout, stderr }`.
 - Streaming execution returns the final response after the process exits, while output deltas are published during execution.
-- `processId` is required for streaming and PTY modes.
+- `processId` is required for streaming modes.
+- `tty: true` is rejected in v0.1.
 
 ## Pi Backend
 

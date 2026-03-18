@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "build:dist": "node scripts/build-dist.mjs",
+    "build:dist": "npm run build && node scripts/build-dist.mjs",
     "check": "npm run build && npm run lint && npm run test",
     "lint": "biome check .",
     "prepare": "husky",

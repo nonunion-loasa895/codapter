@@ -15,7 +15,7 @@ Codapter is a protocol adapter. It exposes the Codex app-server JSON-RPC surface
 3. The adapter serves config/auth/model/thread RPCs from `AppServerConnection`.
 4. Thread RPCs create or attach backend sessions through `IBackend`.
 5. `turn/start` submits a prompt to the backend and streams backend events back as Codex `thread/*`, `turn/*`, and `item/*` notifications.
-6. `command/exec` runs locally in the adapter process through Node child processes or PTYs, not through the backend.
+6. `command/exec` runs locally in the adapter process through Node child processes, not through the backend.
 
 ## Core Contracts
 
@@ -64,7 +64,7 @@ The adapter-owned registry is the source of truth for thread metadata.
 `packages/core/src/command-exec.ts` implements adapter-native shell execution.
 
 - Buffered execution uses `child_process.spawn`.
-- PTY execution uses `node-pty`.
+- `command/exec` is pipe-based in v0.1. `tty: true` is rejected explicitly.
 - Output is streamed as base64 `command/exec/outputDelta` notifications.
 - Process ids are connection-scoped.
 - Closing the connection terminates any tracked command processes.
