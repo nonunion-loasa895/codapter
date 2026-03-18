@@ -26,6 +26,14 @@ Build **codapter** — a protocol adapter that allows the **Codex Desktop GUI** 
 - **Remote mode**: Codapter listens on WebSocket (TCP or UDS). The user is responsible for installing codapter on the remote host and setting up SSH tunneling. There is no automated remote bootstrap/deployment in v0.1.
 - **Wire protocol source of truth**: The Codex app-server protocol types at `codex-rs/app-server-protocol/schema/typescript/v2/` (added as a git submodule). These auto-generated TypeScript types define the exact JSON shapes the GUI expects. All protocol-facing implementation must reference these types, not narrative descriptions in this document.
 
+### Exploration Artifacts
+
+The main checklist/spec stays concise and decision-oriented. Read-only upstream exploration findings should be captured in these supporting docs and then distilled back here only when a concrete implementation decision is accepted:
+
+- `docs/bootstrap/protocol-surface.md` — Codex v2 wire methods, envelopes, notifications, and implementation subset
+- `docs/bootstrap/pi-rpc-surface.md` — Pi RPC/session/event inventory and adapter-facing assumptions
+- `docs/bootstrap/gui-init-config-notes.md` — GUI initialization quirks, config/heartbeat details, command/exec expectations, early smoke-test guidance
+
 ---
 
 ## Codex Desktop Protocol Analysis

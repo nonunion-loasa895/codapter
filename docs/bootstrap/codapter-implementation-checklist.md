@@ -2,6 +2,37 @@
 
 Reference spec: `codex-protocol-analysis.md`
 
+## Pre-Implementation Exploration
+
+Before Milestone 1.1 begins, run a short read-only exploration pass to pin external contracts and reduce rework during implementation. This exploration is not a substitute for the implementation checklist below. It exists to produce durable supporting docs from the upstream sources the implementation depends on.
+
+### Exploration Tracks
+
+- [x] **E1: Codex protocol surface**
+  - Owner: explorer agent
+  - Sources: `../codex/` and protocol schema submodule paths when present
+  - Output: `docs/bootstrap/protocol-surface.md`
+  - Focus: exact v2 wire methods, request/response envelopes, notification payloads, command/exec family, initialize/config/auth/model/thread/turn surfaces
+
+- [x] **E2: Pi backend surface**
+  - Owner: explorer agent
+  - Sources: `../pi-mono/` and related Pi packages
+  - Output: `docs/bootstrap/pi-rpc-surface.md`
+  - Focus: session lifecycle, prompt/abort, model management, token usage, tool event semantics, elicitation, opaque session handling
+
+- [x] **E3: GUI behavior and quirks**
+  - Owner: explorer agent
+  - Sources: `../codex/`, extracted app notes, and related GUI-facing code paths
+  - Output: `docs/bootstrap/gui-init-config-notes.md`
+  - Focus: initialize/config ordering, heartbeat/keepalive, command/exec UI expectations, smoke-test priorities, explicitly out-of-scope remote/worktree behaviors
+
+### Consolidation Rules
+
+- [x] Main thread owns this checklist and `codex-protocol-analysis.md`
+- [x] Explorer agents write findings into the supporting docs above, not into the main checklist/spec
+- [x] Accepted findings are distilled back into the checklist/spec as concrete decisions or clarified milestones
+- [ ] Implementation starts only after the protocol source of truth is pinned locally and the exploration outputs are reviewed
+
 ## Parallelization Tracks
 
 After Milestone 1.1 (project scaffolding) is complete, work can split into parallel tracks:
@@ -109,7 +140,7 @@ After Milestone 1.1 (project scaffolding) is complete, work can split into paral
 **Done when**: `codapter app-server` starts on stdio; `--listen ws://...` starts TCP WebSocket; `--listen unix://...` starts UDS WebSocket. All serve `/rpc` with same protocol.
 
 ### 1.4 Initialize Handshake
-- [ ] Parse `InitializeParams` from incoming request
+- [ ] Parse `InitializeParams` from incoming request (note: initialize remains v1-typed even though most of the external protocol surface is v2)
 - [ ] Extract `clientInfo.name`, `clientInfo.version`, `capabilities`
 - [ ] Store client capabilities (experimentalApi, optOutNotificationMethods)
 - [ ] Enforce `optOutNotificationMethods` — filter outgoing notifications accordingly
@@ -128,18 +159,20 @@ After Milestone 1.1 (project scaffolding) is complete, work can split into paral
 
 The GUI calls `config/read` immediately after `initialize`. These must be in Milestone 1 or the GUI won't load.
 
-- [ ] `config/read` → return sensible defaults; merge with in-memory overrides
-- [ ] `config/value/write` / `config/batchWrite` → store in memory, return success
-- [ ] `configRequirements/read` → return null
-- [ ] `getAuthStatus` → return auth status from backend capabilities
+- [ ] `config/read` → return typed shape `{ config, origins, layers }`; merge sensible defaults with in-memory overrides
+- [ ] `config/value/write` / `config/batchWrite` → return typed `ConfigWriteResponse` shape (`status`, `version`, `filePath`, `overriddenMetadata`)
+- [ ] `configRequirements/read` → return `{ requirements: null }`
+- [ ] `account/read` → return typed account/auth shape
+- [ ] `getAuthStatus` → implement deprecated method for compatibility
 - [ ] `skills/list` → return empty or map from backend
 - [ ] `plugin/list` → return empty
 - [ ] RPC router catch-all: unrecognized methods → JSON-RPC `-32601 Method not found`
 - [ ] Log unrecognized methods at warn level (method name, request ID, truncated params)
-- [ ] Heartbeat responder — echo back keepalive pings
+- [ ] Do not invent an app-level heartbeat RPC; rely on stdio silence and WebSocket transport ping/pong only
 - [ ] Unit tests: config write → read back → same value
 - [ ] Unit test: unknown method → proper error response
-- [ ] Unit test: heartbeat response
+- [ ] Unit test: pre-init request rejection
+- [ ] Unit test: second initialize rejected
 
 **Done when**: GUI loads fully after initialize without config/method errors.
 
@@ -189,8 +222,8 @@ The adapter-owned thread registry is authoritative for all thread identity, meta
 **Done when**: Can create, resume, fork, and dispose sessions through PiBackend. SessionIds are opaque. Clean shutdown kills all children.
 
 ### 2.3 Thread RPC Methods
-- [ ] `thread/start` → call `backend.createSession()`, register in thread registry, return Thread object
-- [ ] `thread/resume` → look up sessionId from registry, call `backend.resumeSession()`, return Thread with turns
+- [ ] `thread/start` → populate required protocol fields, call `backend.createSession()`, register in thread registry, return Thread object
+- [ ] `thread/resume` → populate required protocol fields, look up sessionId from registry, call `backend.resumeSession()`, return Thread with turns
 - [ ] `thread/read` → look up sessionId from registry, call `backend.readSessionHistory()`, translate to ThreadItems
 - [ ] `thread/fork` → reject if turn active; call `backend.forkSession()`, register new thread in registry, return new Thread
 - [ ] `thread/name/set` → call `backend.setSessionName()`, update registry
@@ -236,7 +269,7 @@ The adapter-owned thread registry is authoritative for all thread identity, meta
 
 ### 3.2 Turn RPC Methods
 - [ ] `turn/start` → validate thread state is `ready`; transition to `turn_active`
-- [ ] Map UserInput to Pi prompt format (text, images via ImageContent)
+- [ ] Map `UserInput[]` to Pi prompt format (at minimum text + image/localImage; decide explicit v0.1 behavior for unsupported `skill` / `mention` inputs)
 - [ ] Call `backend.prompt(sessionId, turnId, text, images)`
 - [ ] Emit `turn/started` notification
 - [ ] Route backend events through decomposition state machine
