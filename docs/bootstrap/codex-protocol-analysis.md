@@ -47,6 +47,8 @@ There's also a **Unix domain socket IPC router** at `$TMPDIR/codex-ipc/ipc-$UID.
    method: "initialize", result: {clientId: UUID}}
 ```
 
+**Event Namespace Note**: This document contains two sets of event names. The `codex/event/*` names (Section 1 tables) are from the **Electron GUI's internal mapping layer** — the minified JS wraps v2 protocol notifications. The canonical wire format used by the app-server protocol is the **v2 namespace**: `item/*`, `turn/*`, `thread/*` (Section 9 tables, from `app-server-protocol/src/protocol/common.rs`). **Codapter must implement the v2 wire format**, which is what the GUI actually parses after its own translation layer.
+
 ### RPC Methods (GUI → CLI)
 
 | Method | Purpose |
@@ -563,7 +565,7 @@ Pi is a **TypeScript** agent system at `packages/coding-agent/`. Communication i
 | `config/read` | `get_state` | Map Pi state to Codex config format |
 | `model/list` | `get_available_models` | Direct mapping |
 | `skills/list` | `get_commands` | Map Pi skills/commands |
-| `command/exec` | `bash` | Map Pi bash to Codex command/exec |
+| `command/exec` | **Adapter-native** (Node `child_process`) | NOT routed through Pi — see Decision #35. Pi `bash` is single-threaded and would block during prompts. |
 
 | Codex Streaming Event | Pi Source Event | Notes |
 |----------------------|-----------------|-------|

@@ -15,8 +15,11 @@ After Milestone 1.1 (project scaffolding) is complete, work can split into paral
     Track A: Core       Track B: Pi        Track C: Native
     ────────────        ──────────         ──────────────
     1.2 IBackend        2.2 PiBackend      4.2 command/exec
-    1.3 Transport       (session lifecycle) 5.2 Config stubs
-    1.4 Initialize                         5.3 Unknown methods
+    1.3 Transport       (session lifecycle)
+    1.4 Initialize
+    1.5 Config stubs
+        + unknown methods
+        + heartbeat
     2.1 State mgmt
     2.3 Thread RPCs
            │                 │                  │
@@ -41,7 +44,7 @@ After Milestone 1.1 (project scaffolding) is complete, work can split into paral
 
 **Track B (Pi Integration)**: PiBackend class implementing IBackend. Spawning Pi processes, JSONL communication, session file parsing. Can develop against IBackend contract from Track A.
 
-**Track C (Adapter-Native)**: Features that don't touch the backend at all. Standalone command/exec (Node child_process), config stubs (in-memory store), unknown method error handler. Fully independent.
+**Track C (Adapter-Native)**: Standalone command/exec (Node child_process). Fully independent of backend.
 
 **Convergence**: Milestone 3 (turn execution) is where tracks A and B merge — the state machine translates Pi events into Codex events through the IBackend interface. Track C merges at integration testing.
 
@@ -96,14 +99,36 @@ After Milestone 1.1 (project scaffolding) is complete, work can split into paral
 - [ ] Parse `InitializeParams` from incoming request
 - [ ] Extract `clientInfo.name`, `clientInfo.version`, `capabilities`
 - [ ] Store client capabilities (experimentalApi, optOutNotificationMethods)
+- [ ] Enforce `optOutNotificationMethods` — filter outgoing notifications accordingly
+- [ ] Handle `initialized` client notification after handshake
 - [ ] Return `InitializeResponse` with userAgent, platformFamily, platformOs
 - [ ] Configurable identity: `emulateCodexIdentity` from TOML or env
 - [ ] Log client version, warn on version mismatch
 - [ ] Reject all RPC methods before initialize completes
 - [ ] Unit test: valid initialize → correct response
 - [ ] Unit test: RPC before initialize → error
+- [ ] Unit test: optOutNotificationMethods filtering
 
 **Done when**: Codex Desktop connects, completes handshake, no errors in GUI.
+
+### 1.5 Config Stubs, Unknown Methods & Heartbeat (moved from Milestone 5)
+
+The GUI calls `config/read` immediately after `initialize`. These must be in Milestone 1 or the GUI won't load.
+
+- [ ] `config/read` → return sensible defaults; merge with in-memory overrides
+- [ ] `config/value/write` / `config/batchWrite` → store in memory, return success
+- [ ] `configRequirements/read` → return null
+- [ ] `getAuthStatus` → return auth status from backend capabilities
+- [ ] `skills/list` → return empty or map from backend
+- [ ] `plugin/list` → return empty
+- [ ] RPC router catch-all: unrecognized methods → JSON-RPC `-32601 Method not found`
+- [ ] Log unrecognized methods at warn level (method name, request ID, truncated params)
+- [ ] Heartbeat responder — echo back keepalive pings
+- [ ] Unit tests: config write → read back → same value
+- [ ] Unit test: unknown method → proper error response
+- [ ] Unit test: heartbeat response
+
+**Done when**: GUI loads fully after initialize without config/method errors.
 
 ---
 
@@ -115,10 +140,12 @@ After Milestone 1.1 (project scaffolding) is complete, work can split into paral
 - [ ] Thread ID generation (UUID)
 - [ ] Store: threadId → {sessionPath, name, createdAt, updatedAt, archived, cwd}
 - [ ] Handle mapping corruption: validate on load, skip invalid entries
+- [ ] Atomic writes for mapping store (write to temp file + rename) to prevent multi-window corruption
 - [ ] Unit tests: create, read, update, delete mappings
 - [ ] Unit tests: corrupt file recovery
+- [ ] Unit tests: concurrent write safety
 
-**Done when**: Mapping store persists across adapter restarts.
+**Done when**: Mapping store persists across adapter restarts, safe under concurrent access.
 
 ### 2.2 Pi Backend Implementation (session lifecycle)
 - [ ] Implement `PiBackend` class implementing `IBackend`
@@ -132,9 +159,13 @@ After Milestone 1.1 (project scaffolding) is complete, work can split into paral
 - [ ] Pi process lifecycle: spawn, track, idle timeout, terminate
 - [ ] Configurable idle timeout (env var or TOML, default 5 min)
 - [ ] Max concurrent process limit (default 10)
+- [ ] Child process orphan cleanup: SIGINT/SIGTERM handler kills all Pi children on adapter exit
+- [ ] Handle Pi `cancelled: true` responses from `new_session`/`switch_session`/`fork`
+- [ ] Handle Pi `tool_execution_update` as cumulative output (not pure delta) — diff against previous to extract true delta
+- [ ] Robust NDJSON line-buffering for Pi stdout (handle OS pipe buffer fragmentation)
 - [ ] Unit tests with mock Pi process (mock stdin/stdout)
 
-**Done when**: Can create, resume, fork, list, and dispose sessions through PiBackend.
+**Done when**: Can create, resume, fork, list, and dispose sessions through PiBackend. Clean shutdown kills all children.
 
 ### 2.3 Thread RPC Methods
 - [ ] `thread/start` → call `backend.createSession()`, return Thread object
@@ -147,9 +178,15 @@ After Milestone 1.1 (project scaffolding) is complete, work can split into paral
 - [ ] Per-thread state machine: `starting → ready → turn_active → forking → terminating`
 - [ ] Request queue: buffer turn/start until thread state is `ready`
 - [ ] Thread title generation from first user message
+- [ ] `thread/metadata/update` → update cwd/git info in mapping store
+- [ ] `thread/loaded/list` → return list of currently loaded (process-active) threads
+- [ ] `thread/unsubscribe` → stop sending notifications for a thread to this connection
+- [ ] Token usage: emit `thread/tokenUsage/updated` from Pi `get_session_stats` on turn completion
+- [ ] Stale event gating: ignore late Pi events that arrive after a turn has been completed/interrupted (compare turnId)
 - [ ] Unit tests: each method with mock backend
 - [ ] Unit tests: state machine transitions
 - [ ] Unit tests: request buffering during `starting` state
+- [ ] Unit tests: idle timeout eviction doesn't race with incoming turn/start
 
 **Done when**: Threads appear in Codex Desktop sidebar, can be created/resumed/forked.
 
@@ -196,12 +233,14 @@ After Milestone 1.1 (project scaffolding) is complete, work can split into paral
 **Done when**: Send message in Codex Desktop, see streamed response with thinking.
 
 ### 3.3 Elicitation Support
-- [ ] Listen for Pi `extension_ui_request` events (select, confirm, input, editor)
-- [ ] Map to Codex `elicitation_request` server request
+- [ ] **Verify correct wire method**: Check if GUI expects `item/tool/requestUserInput` or `mcpServer/elicitation/request` (from v2 protocol common.rs:745-751) rather than `codex/event/elicitation_request`. Test against real GUI.
+- [ ] Listen for Pi `extension_ui_request` events (select, confirm, input, editor only)
+- [ ] Map to correct Codex server request method (see above)
 - [ ] Wait for GUI response
 - [ ] Map GUI response → Pi `extension_ui_response`
-- [ ] Ignore non-elicitation Pi UI events (notify, setStatus, setWidget, setTitle)
+- [ ] Ignore non-elicitation Pi UI events (notify, setStatus, setWidget, setTitle) — log at debug level
 - [ ] Unit tests: elicitation round-trip
+- [ ] Unit test: non-elicitation UI events are silently ignored
 
 **Done when**: Pi extension prompts appear as inline forms in Codex Desktop.
 
@@ -245,23 +284,14 @@ After Milestone 1.1 (project scaffolding) is complete, work can split into paral
 - [ ] Model selection on `turn/start` → call `backend.setModel()`
 - [ ] Unit tests: model listing, selection
 
-### 5.2 Config & Auth Stubs
-- [ ] `config/read` → return defaults; merge with in-memory overrides
-- [ ] `config/value/write` → store in memory, return success
-- [ ] `config/batchWrite` → store in memory, return success
-- [ ] `configRequirements/read` → return null
-- [ ] `getAuthStatus` → return auth status from backend capabilities
-- [ ] `skills/list` → call `backend.getCapabilities()` or return empty
-- [ ] `plugin/list` → return empty
-- [ ] In-memory config store survives for adapter lifecycle
-- [ ] Unit tests: write → read back → same value
+### 5.2 Worktree Method Stubs
+- [ ] `create-worktree` → return `-32601` (not supported, but documented)
+- [ ] `delete-worktree` → return `-32601`
+- [ ] `resolve-worktree-for-thread` → return `-32601`
+- [ ] `worktree-cleanup-inputs` → return `-32601`
+- [ ] Document worktree limitations for users
 
-### 5.3 Unknown Method Handling
-- [ ] RPC router catch-all: unrecognized methods → JSON-RPC `-32601`
-- [ ] Log unrecognized methods at warn level
-- [ ] Unit test: unknown method → proper error response
-
-**Done when**: Model picker works, settings pages don't crash.
+**Done when**: Model picker works, worktree methods fail gracefully.
 
 ---
 
