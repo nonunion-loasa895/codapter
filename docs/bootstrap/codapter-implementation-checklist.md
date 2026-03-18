@@ -254,13 +254,29 @@ The adapter-owned thread registry is authoritative for all thread identity, meta
 **Done when**: Send message in Codex Desktop, see streamed response with thinking.
 
 ### 3.3 Elicitation Support
-- [ ] **Verify correct wire method**: Check if GUI expects `item/tool/requestUserInput` or `mcpServer/elicitation/request` (from v2 protocol common.rs:745-751) rather than `codex/event/elicitation_request`. Test against real GUI.
-- [ ] Listen for Pi `extension_ui_request` events (select, confirm, input, editor only)
-- [ ] Map to correct Codex server request method (see above)
-- [ ] Wait for GUI response
-- [ ] Map GUI response → Pi `extension_ui_response`
+
+The v2 protocol defines two server-request methods for user input:
+
+- **`item/tool/requestUserInput`** (EXPERIMENTAL) — structured questions with options. Params: `{threadId, turnId, itemId, questions: [{id, header, question, isOther, isSecret, options}]}`. Response: `{answers: {[questionId]: answer}}`.
+- **`mcpServer/elicitation/request`** — MCP server elicitation with form schema or URL. Params: `{threadId, turnId?, serverName, mode: "form"|"url", message, requestedSchema|url}`. Response: `{action: "approve"|"deny"|"dismiss", content?}`.
+
+The GUI also recognizes legacy `codex/event/elicitation_request` and `codex/event/request_user_input` names (these are the Electron mapping layer names for the same v2 methods).
+
+**Pi mapping**: Pi `extension_ui_request` methods map to `item/tool/requestUserInput`:
+- Pi `select` (options list) → question with `options` array
+- Pi `confirm` (yes/no) → question with two options
+- Pi `input` (free text) → question with `isOther: true`, no options
+- Pi `editor` (multi-line) → question with `isOther: true`, no options
+
+Tasks:
+- [ ] Map Pi `extension_ui_request` (select, confirm, input, editor) → `item/tool/requestUserInput` server request
+- [ ] Translate Pi question format to `ToolRequestUserInputQuestion` shape (id, header, question, options)
+- [ ] Wait for GUI response (`ToolRequestUserInputResponse` with answers map)
+- [ ] Translate GUI answers back → Pi `extension_ui_response`
 - [ ] Ignore non-elicitation Pi UI events (notify, setStatus, setWidget, setTitle) — log at debug level
-- [ ] Unit tests: elicitation round-trip
+- [ ] Unit tests: select → requestUserInput round-trip
+- [ ] Unit tests: confirm → requestUserInput round-trip
+- [ ] Unit tests: input/editor → requestUserInput round-trip
 - [ ] Unit test: non-elicitation UI events are silently ignored
 
 **Done when**: Pi extension prompts appear as inline forms in Codex Desktop.
