@@ -161,7 +161,7 @@ describeIfSmoke("codapter smoke", () => {
         id: 1,
         method: "initialize",
         params: {
-          clientInfo: { name: "codapter-smoke", title: null, version: "0.1.0" },
+          clientInfo: { name: "codapter-smoke", title: null, version: "0.0.1" },
           capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
         },
       });
@@ -224,7 +224,7 @@ describeIfSmoke("codapter smoke", () => {
         id: 1,
         method: "initialize",
         params: {
-          clientInfo: { name: "codapter-smoke", title: null, version: "0.1.0" },
+          clientInfo: { name: "codapter-smoke", title: null, version: "0.0.1" },
           capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
         },
       });

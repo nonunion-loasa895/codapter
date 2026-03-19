@@ -167,7 +167,7 @@ describe("AppServerConnection", () => {
       id: 1,
       method: "initialize",
       params: {
-        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
         capabilities: { experimentalApi: true, optOutNotificationMethods: ["thread/started"] },
       },
     });
@@ -175,7 +175,7 @@ describe("AppServerConnection", () => {
       id: 2,
       method: "initialize",
       params: {
-        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
         capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
       },
     });
@@ -204,7 +204,7 @@ describe("AppServerConnection", () => {
       id: 1,
       method: "initialize",
       params: {
-        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
         capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
       },
     });
@@ -220,7 +220,7 @@ describe("AppServerConnection", () => {
       id: 1,
       method: "initialize",
       params: {
-        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
         capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
       },
     });
@@ -265,7 +265,7 @@ describe("AppServerConnection", () => {
       id: 1,
       method: "initialize",
       params: {
-        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
         capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
       },
     });
@@ -363,7 +363,7 @@ describe("AppServerConnection", () => {
       id: 1,
       method: "initialize",
       params: {
-        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
         capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
       },
     });
@@ -413,7 +413,7 @@ describe("AppServerConnection", () => {
       id: 1,
       method: "initialize",
       params: {
-        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
         capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
       },
     });
@@ -464,7 +464,7 @@ describe("AppServerConnection", () => {
       id: 1,
       method: "initialize",
       params: {
-        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
         capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
       },
     });
@@ -532,7 +532,7 @@ describe("AppServerConnection", () => {
       id: 1,
       method: "initialize",
       params: {
-        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
         capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
       },
     });
@@ -567,7 +567,7 @@ describe("AppServerConnection", () => {
       id: 1,
       method: "initialize",
       params: {
-        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
         capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
       },
     });
@@ -611,7 +611,7 @@ describe("AppServerConnection", () => {
         id: 1,
         method: "initialize",
         params: {
-          clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
           capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
         },
       });
@@ -763,7 +763,7 @@ describe("AppServerConnection", () => {
         id: 1,
         method: "initialize",
         params: {
-          clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
           capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
         },
       });
@@ -892,7 +892,7 @@ describe("AppServerConnection", () => {
         id: 1,
         method: "initialize",
         params: {
-          clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
           capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
         },
       });
@@ -970,7 +970,7 @@ describe("AppServerConnection", () => {
         id: 1,
         method: "initialize",
         params: {
-          clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
           capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
         },
       });
@@ -1089,7 +1089,7 @@ describe("AppServerConnection", () => {
         id: 1,
         method: "initialize",
         params: {
-          clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
           capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
         },
       });
@@ -1155,7 +1155,7 @@ describe("AppServerConnection", () => {
       id: 1,
       method: "initialize",
       params: {
-        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
         capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
       },
     });
@@ -1241,7 +1241,7 @@ describe("AppServerConnection", () => {
         id: 1,
         method: "initialize",
         params: {
-          clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
           capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
         },
       });
@@ -1303,7 +1303,7 @@ describe("AppServerConnection", () => {
       id: 1,
       method: "initialize",
       params: {
-        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
         capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
       },
     });
@@ -1364,7 +1364,7 @@ describe("AppServerConnection", () => {
         id: 1,
         method: "initialize",
         params: {
-          clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
           capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
         },
       });

@@ -36,7 +36,7 @@ Status:
 | `getAuthStatus` | `AppServerConnection.handleGetAuthStatus()` | Supported for compatibility. |
 | `skills/list` | `AppServerConnection.handleSkillsList()` | Currently returns an empty payload unless the backend provides data. |
 | `plugin/list` | `AppServerConnection.handlePluginList()` | Currently returns an empty payload unless the backend provides data. |
-| Adapter identity | `packages/core/src/app-server.ts` | Derived from env/TOML override or `codapter/0.1.0`, with platform detection. |
+| Adapter identity | `packages/core/src/app-server.ts` | Derived from env/TOML override or `codapter/0.0.1`, with platform detection. |
 
 ## Threads
 

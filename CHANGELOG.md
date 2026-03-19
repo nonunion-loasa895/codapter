@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 - Unreleased
+## 0.0.1 - Unreleased
 
 - Initialized the codapter workspace, packages, transport layer, and build tooling.
 - Added a real Pi subprocess backend with opaque session tracking and JSONL RPC bridging.

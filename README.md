@@ -2,6 +2,10 @@
 
 A protocol adapter that lets the [Codex Desktop](https://developers.openai.com/codex/app) GUI work with alternative AI backends. Set `CODEX_CLI_PATH` to point at codapter, launch Codex Desktop, and your conversations are powered by the backend of your choice.
 
+![Codapter running inside Codex Desktop](docs/images/codex-desktop-example.png)
+
+*Codex Desktop connected through codapter to a Pi-backed remote session.*
+
 **First supported backend**: [Pi](https://github.com/badlogic/pi-mono) (`@mariozechner/pi-coding-agent`) with multi-provider LLM support (Anthropic, OpenAI, Google, Mistral, and more).
 
 ## How It Works
@@ -305,6 +309,14 @@ Notifications emitted to the GUI during turns:
 ## Remote Setup
 
 ### SSH Tunnel (WebSocket/TCP)
+
+If `codapter.mjs` is on the remote host's `PATH`, you can sanity-check the remote binary directly:
+
+```bash
+ssh user@remote-host 'codapter.mjs app-server'
+```
+
+For an actual remote desktop connection, start a listener on the remote host and forward it locally:
 
 ```bash
 # On remote host:
