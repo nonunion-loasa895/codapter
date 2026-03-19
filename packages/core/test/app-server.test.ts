@@ -75,7 +75,16 @@ class TestBackend implements IBackend {
         hidden: false,
         isDefault: true,
         inputModalities: ["text"],
-        supportedReasoningEfforts: ["minimal", "medium"],
+        supportedReasoningEfforts: [
+          {
+            reasoningEffort: "minimal",
+            description: "Fast responses with lighter reasoning",
+          },
+          {
+            reasoningEffort: "medium",
+            description: "Balanced reasoning",
+          },
+        ],
         defaultReasoningEffort: "medium",
         supportsPersonality: true,
       },
@@ -126,6 +135,11 @@ class TestBackend implements IBackend {
 
 function createBackend(onPromptCallback?: ConstructorParameters<typeof TestBackend>[0]): IBackend {
   return new TestBackend(onPromptCallback);
+}
+
+function createFakeJwt(payload: Record<string, unknown>): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "none", typ: "JWT" })}.${encode(payload)}.sig`;
 }
 
 describe("AppServerConnection", () => {
@@ -198,6 +212,149 @@ describe("AppServerConnection", () => {
     expect(connection.initializedNotificationReceived).toBe(false);
     await connection.handleMessage({ method: "initialized" });
     expect(connection.initializedNotificationReceived).toBe(true);
+  });
+
+  it("returns an empty account/rateLimits/read snapshot", async () => {
+    const connection = new AppServerConnection();
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    const response = await connection.handleMessage({
+      id: 2,
+      method: "account/rateLimits/read",
+    });
+
+    expect(response).toEqual({
+      id: 2,
+      result: {
+        rateLimits: {
+          limitId: null,
+          limitName: null,
+          primary: null,
+          secondary: null,
+          credits: null,
+          planType: null,
+        },
+        rateLimitsByLimitId: null,
+      },
+    });
+  });
+
+  it("stores chatgptAuthTokens login state and publishes auth notifications", async () => {
+    const notifications: Array<{ method: string; params?: unknown }> = [];
+    const connection = new AppServerConnection({
+      onMessage(message) {
+        notifications.push(message);
+      },
+    });
+    const accessToken = createFakeJwt({
+      email: "user@example.com",
+      "https://api.openai.com/auth": {
+        chatgpt_account_id: "workspace-1",
+        chatgpt_plan_type: "pro",
+      },
+    });
+
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    const login = await connection.handleMessage({
+      id: 2,
+      method: "account/login/start",
+      params: {
+        type: "chatgptAuthTokens",
+        accessToken,
+        chatgptAccountId: "workspace-1",
+        chatgptPlanType: "pro",
+      },
+    });
+
+    expect(login).toEqual({
+      id: 2,
+      result: { type: "chatgptAuthTokens" },
+    });
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        {
+          method: "account/login/completed",
+          params: { loginId: null, success: true, error: null },
+        },
+        {
+          method: "account/updated",
+          params: { authMode: "chatgptAuthTokens", planType: "pro" },
+        },
+      ])
+    );
+
+    await expect(
+      connection.handleMessage({
+        id: 3,
+        method: "account/read",
+        params: { refreshToken: false },
+      })
+    ).resolves.toEqual({
+      id: 3,
+      result: {
+        account: { type: "chatgpt", email: "user@example.com", planType: "pro" },
+        requiresOpenaiAuth: false,
+      },
+    });
+
+    await expect(
+      connection.handleMessage({
+        id: 4,
+        method: "getAuthStatus",
+        params: { includeToken: true, refreshToken: false },
+      })
+    ).resolves.toEqual({
+      id: 4,
+      result: {
+        authMethod: "chatgptAuthTokens",
+        authToken: accessToken,
+        requiresOpenaiAuth: false,
+      },
+    });
+
+    await expect(
+      connection.handleMessage({
+        id: 5,
+        method: "account/logout",
+      })
+    ).resolves.toEqual({
+      id: 5,
+      result: {},
+    });
+
+    await expect(
+      connection.handleMessage({
+        id: 6,
+        method: "account/read",
+        params: { refreshToken: false },
+      })
+    ).resolves.toEqual({
+      id: 6,
+      result: {
+        account: null,
+        requiresOpenaiAuth: false,
+      },
+    });
+
+    expect(notifications.at(-1)).toEqual({
+      method: "account/updated",
+      params: { authMode: null, planType: null },
+    });
   });
 
   it("writes config values and reads them back", async () => {
@@ -280,7 +437,16 @@ describe("AppServerConnection", () => {
             displayName: "GPT-5.4 Mini",
             description: "Fast model",
             hidden: false,
-            supportedReasoningEfforts: ["minimal", "medium"],
+            supportedReasoningEfforts: [
+              {
+                reasoningEffort: "minimal",
+                description: "Fast responses with lighter reasoning",
+              },
+              {
+                reasoningEffort: "medium",
+                description: "Balanced reasoning",
+              },
+            ],
             defaultReasoningEffort: "medium",
             inputModalities: ["text"],
             supportsPersonality: true,
@@ -458,6 +624,9 @@ describe("AppServerConnection", () => {
           persistExtendedHistory: false,
           cwd: "/repo",
           modelProvider: "pi",
+          approvalPolicy: "never",
+          approvalsReviewer: "user",
+          sandbox: "danger-full-access",
         },
       });
       expect(started).toMatchObject({
@@ -469,6 +638,9 @@ describe("AppServerConnection", () => {
             modelProvider: "pi",
             status: { type: "idle" },
           },
+          approvalPolicy: "never",
+          approvalsReviewer: "user",
+          sandbox: { type: "dangerFullAccess" },
         },
       });
 

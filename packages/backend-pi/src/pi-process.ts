@@ -237,8 +237,36 @@ function mapUpstreamModel(model: unknown, index: number): BackendModelSummary | 
     hidden: false,
     isDefault: index === 0,
     inputModalities,
-    supportedReasoningEfforts: reasoning ? ["minimal", "low", "medium", "high", "xhigh"] : ["off"],
-    defaultReasoningEffort: reasoning ? "medium" : "off",
+    supportedReasoningEfforts: reasoning
+      ? [
+          {
+            reasoningEffort: "minimal",
+            description: "Fast responses with lighter reasoning",
+          },
+          {
+            reasoningEffort: "low",
+            description: "Balances speed with some reasoning",
+          },
+          {
+            reasoningEffort: "medium",
+            description: "Provides a solid balance of reasoning depth and latency",
+          },
+          {
+            reasoningEffort: "high",
+            description: "Greater reasoning depth for complex problems",
+          },
+          {
+            reasoningEffort: "xhigh",
+            description: "Extra high reasoning depth for complex problems",
+          },
+        ]
+      : [
+          {
+            reasoningEffort: "none",
+            description: "No additional reasoning",
+          },
+        ],
+    defaultReasoningEffort: reasoning ? "medium" : "none",
     supportsPersonality: false,
   };
 }

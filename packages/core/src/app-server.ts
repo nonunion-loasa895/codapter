@@ -23,7 +23,11 @@ import {
   success,
 } from "./jsonrpc.js";
 import type {
+  AccountLoginCompletedNotification,
+  AccountUpdatedNotification,
   AppListResponse,
+  CancelLoginAccountParams,
+  CancelLoginAccountResponse,
   CollaborationModeListResponse,
   CommandExecParams,
   CommandExecResizeParams,
@@ -38,15 +42,22 @@ import type {
   ConfigWriteResponse,
   ExperimentalFeatureListResponse,
   GetAccountParams,
+  GetAccountRateLimitsResponse,
   GetAccountResponse,
   GetAuthStatusResponse,
   GitInfo,
   InitializeParams,
   InitializeResponse,
   JsonValue,
+  LoginAccountParams,
+  LoginAccountResponse,
+  LogoutAccountResponse,
   McpServerStatusListResponse,
   ModelListResponse,
+  PlanType,
   PluginListResponse,
+  SandboxMode,
+  SandboxPolicy,
   SkillsListResponse,
   Thread,
   ThreadArchiveParams,
@@ -98,7 +109,7 @@ const JSON_RPC_ALREADY_INITIALIZED = -32003;
 const ADAPTER_VERSION = "0.1.0";
 const DEFAULT_APPROVAL_POLICY = "never";
 const DEFAULT_APPROVALS_REVIEWER = "user";
-const DEFAULT_SANDBOX = { mode: "workspace-write" } as const;
+const DEFAULT_SANDBOX_MODE: SandboxMode = "workspace-write";
 const DEFAULT_MODEL_PROVIDER = "pi";
 const INTERNAL_TITLE_THREAD_PROMPT_PREFIX =
   "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task";
@@ -158,6 +169,16 @@ interface PendingToolUserInputRequest {
   reject(error: unknown): void;
 }
 
+type StoredAuthState =
+  | { mode: "apikey"; apiKey: string }
+  | {
+      mode: "chatgptAuthTokens";
+      accessToken: string;
+      accountId: string;
+      email: string | null;
+      planType: PlanType;
+    };
+
 function detectPlatformFamily(): string {
   return process.platform === "win32" ? "windows" : "unix";
 }
@@ -195,6 +216,85 @@ function createIdentity(): AppServerIdentity {
     platformFamily: detectPlatformFamily(),
     platformOs: detectPlatformOs(),
   };
+}
+
+function normalizePlanType(value: unknown): PlanType {
+  const normalized = typeof value === "string" ? value.toLowerCase() : "";
+  switch (normalized) {
+    case "free":
+    case "go":
+    case "plus":
+    case "pro":
+    case "team":
+    case "business":
+    case "enterprise":
+    case "edu":
+    case "unknown":
+      return normalized as PlanType;
+    default:
+      return "unknown";
+  }
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const segments = token.split(".");
+  if (segments.length < 2) {
+    return null;
+  }
+
+  const base64 = segments[1].replace(/-/g, "+").replace(/_/g, "/");
+  const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+  try {
+    const parsed = JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractChatgptIdentity(accessToken: string): { email: string | null; planType: PlanType } {
+  const payload = decodeJwtPayload(accessToken);
+  const profile =
+    payload?.profile && typeof payload.profile === "object"
+      ? (payload.profile as Record<string, unknown>)
+      : null;
+  const authClaims =
+    payload?.["https://api.openai.com/auth"] &&
+    typeof payload["https://api.openai.com/auth"] === "object"
+      ? (payload["https://api.openai.com/auth"] as Record<string, unknown>)
+      : null;
+  const email =
+    typeof payload?.email === "string"
+      ? payload.email
+      : typeof profile?.email === "string"
+        ? profile.email
+        : null;
+  return {
+    email,
+    planType: normalizePlanType(authClaims?.chatgpt_plan_type),
+  };
+}
+
+function buildSandboxPolicy(mode: SandboxMode | null | undefined, cwd: string): SandboxPolicy {
+  switch (mode ?? DEFAULT_SANDBOX_MODE) {
+    case "danger-full-access":
+      return { type: "dangerFullAccess" };
+    case "read-only":
+      return {
+        type: "readOnly",
+        access: { type: "fullAccess" },
+        networkAccess: false,
+      };
+    default:
+      return {
+        type: "workspaceWrite",
+        writableRoots: [cwd],
+        readOnlyAccess: { type: "fullAccess" },
+        networkAccess: false,
+        excludeTmpdirEnvVar: false,
+        excludeSlashTmp: false,
+      };
+  }
 }
 
 function defaultLogger(): AppServerLogger {
@@ -773,6 +873,7 @@ export class AppServerConnection {
     string | number,
     PendingToolUserInputRequest
   >();
+  private authState: StoredAuthState | null = null;
   private readonly state: ConnectionState = {
     initialized: false,
     initializedNotificationReceived: false,
@@ -860,8 +961,16 @@ export class AppServerConnection {
           return success(request.id, this.handleConfigRequirementsRead());
         case "account/read":
           return success(request.id, this.handleAccountRead(request.params));
+        case "account/login/start":
+          return success(request.id, await this.handleAccountLoginStart(request.params));
+        case "account/login/cancel":
+          return success(request.id, this.handleAccountLoginCancel(request.params));
+        case "account/logout":
+          return success(request.id, await this.handleAccountLogout());
+        case "account/rateLimits/read":
+          return success(request.id, this.handleAccountRateLimitsRead());
         case "getAuthStatus":
-          return success(request.id, this.handleGetAuthStatus());
+          return success(request.id, this.handleGetAuthStatus(request.params));
         case "skills/list":
           return success(request.id, this.handleSkillsList());
         case "plugin/list":
@@ -1105,18 +1214,123 @@ export class AppServerConnection {
 
   private handleAccountRead(params: unknown): GetAccountResponse {
     const parsed = (params ?? {}) as Partial<GetAccountParams>;
+    const account =
+      this.authState?.mode === "apikey"
+        ? { type: "apiKey" as const }
+        : this.authState?.mode === "chatgptAuthTokens" && this.authState.email
+          ? {
+              type: "chatgpt" as const,
+              email: this.authState.email,
+              planType: this.authState.planType,
+            }
+          : null;
     return {
-      account: null,
+      account,
       requiresOpenaiAuth: Boolean(parsed.refreshToken) && false,
     };
   }
 
-  private handleGetAuthStatus(): GetAuthStatusResponse {
+  private async handleAccountLoginStart(params: unknown): Promise<LoginAccountResponse> {
+    const parsed = params as LoginAccountParams;
+    switch (parsed?.type) {
+      case "apiKey":
+        this.authState = { mode: "apikey", apiKey: parsed.apiKey };
+        await this.publishAccountLoginCompleted({
+          loginId: null,
+          success: true,
+          error: null,
+        });
+        await this.publishAccountUpdated();
+        return { type: "apiKey" };
+      case "chatgptAuthTokens": {
+        const identity = extractChatgptIdentity(parsed.accessToken);
+        this.authState = {
+          mode: "chatgptAuthTokens",
+          accessToken: parsed.accessToken,
+          accountId: parsed.chatgptAccountId,
+          email: identity.email,
+          planType:
+            parsed.chatgptPlanType === null || parsed.chatgptPlanType === undefined
+              ? identity.planType
+              : normalizePlanType(parsed.chatgptPlanType),
+        };
+        await this.publishAccountLoginCompleted({
+          loginId: null,
+          success: true,
+          error: null,
+        });
+        await this.publishAccountUpdated();
+        return { type: "chatgptAuthTokens" };
+      }
+      case "chatgpt":
+        throw new Error(
+          "Interactive ChatGPT login is not supported by codapter; use chatgptAuthTokens instead."
+        );
+      default:
+        throw new Error("Invalid account/login/start params");
+    }
+  }
+
+  private handleAccountLoginCancel(params: unknown): CancelLoginAccountResponse {
+    const parsed = params as Partial<CancelLoginAccountParams>;
+    if (typeof parsed?.loginId !== "string") {
+      throw new Error("Invalid account/login/cancel params");
+    }
+    return { status: "notFound" };
+  }
+
+  private async handleAccountLogout(): Promise<LogoutAccountResponse> {
+    this.authState = null;
+    await this.publishAccountUpdated();
+    return {};
+  }
+
+  private handleAccountRateLimitsRead(): GetAccountRateLimitsResponse {
     return {
-      authMethod: null,
-      authToken: null,
+      rateLimits: {
+        limitId: null,
+        limitName: null,
+        primary: null,
+        secondary: null,
+        credits: null,
+        planType: null,
+      },
+      rateLimitsByLimitId: null,
+    };
+  }
+
+  private handleGetAuthStatus(params: unknown): GetAuthStatusResponse {
+    const parsed = (params ?? {}) as { includeToken?: boolean | null } | null;
+    const includeToken = Boolean(parsed?.includeToken);
+    const authMethod = this.authState?.mode ?? null;
+    const authToken =
+      !includeToken || !this.authState
+        ? null
+        : this.authState.mode === "apikey"
+          ? this.authState.apiKey
+          : this.authState.accessToken;
+    return {
+      authMethod,
+      authToken,
       requiresOpenaiAuth: false,
     };
+  }
+
+  private currentAccountUpdatedNotification(): AccountUpdatedNotification {
+    return {
+      authMode: this.authState?.mode ?? null,
+      planType: this.authState?.mode === "chatgptAuthTokens" ? this.authState.planType : null,
+    };
+  }
+
+  private async publishAccountLoginCompleted(
+    payload: AccountLoginCompletedNotification
+  ): Promise<void> {
+    await this.publish("account/login/completed", payload);
+  }
+
+  private async publishAccountUpdated(): Promise<void> {
+    await this.publish("account/updated", this.currentAccountUpdatedNotification());
   }
 
   private handleSkillsList(): SkillsListResponse {
@@ -1212,7 +1426,10 @@ export class AppServerConnection {
     return await this.buildThreadExecutionResponse(
       thread,
       parsed.model ?? null,
-      parsed.cwd ?? null
+      parsed.cwd ?? null,
+      parsed.approvalPolicy ?? null,
+      parsed.approvalsReviewer ?? null,
+      parsed.sandbox ?? null
     );
   }
 
@@ -1239,7 +1456,10 @@ export class AppServerConnection {
     return await this.buildThreadExecutionResponse(
       thread,
       parsed.model ?? null,
-      parsed.cwd ?? null
+      parsed.cwd ?? null,
+      parsed.approvalPolicy ?? null,
+      parsed.approvalsReviewer ?? null,
+      parsed.sandbox ?? null
     );
   }
 
@@ -1277,7 +1497,10 @@ export class AppServerConnection {
     return await this.buildThreadExecutionResponse(
       thread,
       parsed.model ?? null,
-      parsed.cwd ?? null
+      parsed.cwd ?? null,
+      parsed.approvalPolicy ?? null,
+      parsed.approvalsReviewer ?? null,
+      parsed.sandbox ?? null
     );
   }
 
@@ -1744,20 +1967,24 @@ export class AppServerConnection {
   private async buildThreadExecutionResponse(
     thread: Thread,
     requestedModel: string | null,
-    requestedCwd: string | null
+    requestedCwd: string | null,
+    requestedApprovalPolicy: string | null,
+    requestedApprovalsReviewer: string | null,
+    requestedSandboxMode: SandboxMode | null
   ): Promise<ThreadStartResponse> {
     const models = this.backend ? await this.backend.listModels() : [];
     const defaultModel = models.find((model) => model.isDefault) ?? models[0];
+    const cwd = requestedCwd ?? thread.cwd;
 
     return {
       thread,
       model: requestedModel ?? defaultModel?.model ?? "pi-default",
       modelProvider: thread.modelProvider,
       serviceTier: null,
-      cwd: requestedCwd ?? thread.cwd,
-      approvalPolicy: DEFAULT_APPROVAL_POLICY,
-      approvalsReviewer: DEFAULT_APPROVALS_REVIEWER,
-      sandbox: DEFAULT_SANDBOX,
+      cwd,
+      approvalPolicy: requestedApprovalPolicy ?? DEFAULT_APPROVAL_POLICY,
+      approvalsReviewer: requestedApprovalsReviewer ?? DEFAULT_APPROVALS_REVIEWER,
+      sandbox: buildSandboxPolicy(requestedSandboxMode, cwd),
       reasoningEffort: defaultModel?.defaultReasoningEffort ?? null,
     };
   }

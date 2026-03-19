@@ -263,7 +263,7 @@ function parseListenTarget(rawTarget: string): ParsedListenTarget {
     throw new Error(`Unsupported listen target: ${rawTarget}`);
   }
 
-  if (url.pathname !== "/" && url.pathname !== "/rpc") {
+  if (url.pathname !== "/") {
     throw new Error(`Unsupported WebSocket path in listen target: ${rawTarget}`);
   }
 
@@ -360,7 +360,7 @@ function createRpcServer(options: ListenerOptions): {
       return;
     }
 
-    if (request.url !== "/rpc") {
+    if (request.url !== "/") {
       socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
       socket.destroy();
       return;

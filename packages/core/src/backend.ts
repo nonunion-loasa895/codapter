@@ -20,6 +20,11 @@ export interface BackendSessionSummary {
   readonly updatedAt: string;
 }
 
+export interface BackendReasoningEffortOption {
+  readonly reasoningEffort: string;
+  readonly description: string;
+}
+
 export interface BackendModelSummary {
   readonly id: string;
   readonly model: string;
@@ -28,7 +33,7 @@ export interface BackendModelSummary {
   readonly hidden: boolean;
   readonly isDefault: boolean;
   readonly inputModalities: readonly string[];
-  readonly supportedReasoningEfforts: readonly string[];
+  readonly supportedReasoningEfforts: readonly BackendReasoningEffortOption[];
   readonly defaultReasoningEffort: string;
   readonly supportsPersonality: boolean;
 }

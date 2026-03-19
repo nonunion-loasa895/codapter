@@ -103,7 +103,7 @@ Codapter supports three transport modes, all serving the same JSON-RPC protocol:
 
 The `CODAPTER_LISTEN` environment variable can be used instead of `--listen` flags (comma-separated for multiple listeners).
 
-All WebSocket listeners serve the `/rpc` endpoint. Health checks are available at `/healthz` and `/readyz`.
+All WebSocket listeners serve the root `/` endpoint. Health checks are available at `/healthz` and `/readyz`.
 
 ### Request Lifecycle
 
@@ -313,7 +313,7 @@ node /path/to/codapter.mjs app-server --listen ws://127.0.0.1:9234
 # From local machine:
 ssh -N -L 9234:127.0.0.1:9234 user@remote-host
 
-# Codex Desktop connects to ws://127.0.0.1:9234/rpc
+# Codex Desktop connects to ws://127.0.0.1:9234/
 ```
 
 ### SSH Tunnel (Unix Domain Socket)
@@ -327,7 +327,7 @@ node /path/to/codapter.mjs app-server --listen unix://$HOME/.codex/adapter.sock
 # From local machine (streamlocal forward):
 ssh -N -L 127.0.0.1:9234:/home/user/workspace/.codex/adapter.sock user@host
 
-# Codex Desktop connects to ws://127.0.0.1:9234/rpc
+# Codex Desktop connects to ws://127.0.0.1:9234/
 ```
 
 ### Persistent Remote Mode

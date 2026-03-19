@@ -39,7 +39,7 @@ function connectWebSocket(
   init?: { headers?: Record<string, string> }
 ): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const websocket = new WebSocket(`${address}/rpc`, {
+    const websocket = new WebSocket(address, {
       headers: init?.headers,
     });
 
@@ -91,6 +91,19 @@ describe("parseListenTargets", () => {
       listenTargets: ["ws://127.0.0.1:8080", "unix:///tmp/codapter.sock"],
       analyticsDefaultEnabledSeen: false,
     });
+  });
+
+  it("rejects non-root websocket listen paths", async () => {
+    const backend = createPiBackend();
+    await backend.initialize();
+
+    try {
+      await expect(startAppServerListeners(["ws://127.0.0.1:0/rpc"], { backend })).rejects.toThrow(
+        "Unsupported WebSocket path in listen target: ws://127.0.0.1:0/rpc"
+      );
+    } finally {
+      await backend.dispose();
+    }
   });
 });
 

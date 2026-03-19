@@ -135,11 +135,86 @@ export type GetAccountParams = {
   refreshToken: boolean;
 };
 
-export type Account = { type: "apiKey" } | { type: "chatgpt"; email: string; planType: string };
+export type Account = { type: "apiKey" } | { type: "chatgpt"; email: string; planType: PlanType };
 
 export type GetAccountResponse = {
   account: Account | null;
   requiresOpenaiAuth: boolean;
+};
+
+export type LoginAccountParams =
+  | { type: "apiKey"; apiKey: string }
+  | { type: "chatgpt" }
+  | {
+      type: "chatgptAuthTokens";
+      accessToken: string;
+      chatgptAccountId: string;
+      chatgptPlanType?: string | null;
+    };
+
+export type LoginAccountResponse =
+  | { type: "apiKey" }
+  | { type: "chatgpt"; loginId: string; authUrl: string }
+  | { type: "chatgptAuthTokens" };
+
+export type CancelLoginAccountParams = {
+  loginId: string;
+};
+
+export type CancelLoginAccountStatus = "canceled" | "notFound";
+
+export type CancelLoginAccountResponse = {
+  status: CancelLoginAccountStatus;
+};
+
+export type LogoutAccountResponse = Record<string, never>;
+
+export type AccountUpdatedNotification = {
+  authMode: AuthMode | null;
+  planType: PlanType | null;
+};
+
+export type AccountLoginCompletedNotification = {
+  loginId: string | null;
+  success: boolean;
+  error: string | null;
+};
+
+export type PlanType =
+  | "free"
+  | "go"
+  | "plus"
+  | "pro"
+  | "team"
+  | "business"
+  | "enterprise"
+  | "edu"
+  | "unknown";
+
+export type CreditsSnapshot = {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: string | null;
+};
+
+export type RateLimitWindow = {
+  usedPercent: number;
+  windowDurationMins: number | null;
+  resetsAt: number | null;
+};
+
+export type RateLimitSnapshot = {
+  limitId: string | null;
+  limitName: string | null;
+  primary: RateLimitWindow | null;
+  secondary: RateLimitWindow | null;
+  credits: CreditsSnapshot | null;
+  planType: PlanType | null;
+};
+
+export type GetAccountRateLimitsResponse = {
+  rateLimits: RateLimitSnapshot;
+  rateLimitsByLimitId: { [key: string]: RateLimitSnapshot | undefined } | null;
 };
 
 export type GetAuthStatusParams = {
@@ -237,11 +312,16 @@ export type Model = {
   displayName: string;
   description: string;
   hidden: boolean;
-  supportedReasoningEfforts: string[];
+  supportedReasoningEfforts: ReasoningEffortOption[];
   defaultReasoningEffort: string;
   inputModalities: string[];
   supportsPersonality: boolean;
   isDefault: boolean;
+};
+
+export type ReasoningEffortOption = {
+  reasoningEffort: string;
+  description: string;
 };
 
 export type ModelListParams = {
@@ -362,7 +442,7 @@ export type ThreadStartParams = {
   cwd?: string | null;
   approvalPolicy?: string | null;
   approvalsReviewer?: string | null;
-  sandbox?: string | null;
+  sandbox?: SandboxMode | null;
   config?: { [key: string]: JsonValue | undefined } | null;
   serviceName?: string | null;
   baseInstructions?: string | null;
@@ -381,7 +461,7 @@ export type ThreadStartResponse = {
   cwd: string;
   approvalPolicy: string;
   approvalsReviewer: string;
-  sandbox: JsonValue;
+  sandbox: SandboxPolicy;
   reasoningEffort: string | null;
 };
 
@@ -395,7 +475,7 @@ export type ThreadResumeParams = {
   cwd?: string | null;
   approvalPolicy?: string | null;
   approvalsReviewer?: string | null;
-  sandbox?: string | null;
+  sandbox?: SandboxMode | null;
   config?: { [key: string]: JsonValue | undefined } | null;
   baseInstructions?: string | null;
   developerInstructions?: string | null;
@@ -414,7 +494,7 @@ export type ThreadForkParams = {
   cwd?: string | null;
   approvalPolicy?: string | null;
   approvalsReviewer?: string | null;
-  sandbox?: string | null;
+  sandbox?: SandboxMode | null;
   config?: { [key: string]: JsonValue | undefined } | null;
   baseInstructions?: string | null;
   developerInstructions?: string | null;
@@ -506,6 +586,30 @@ export type ThreadTokenUsage = {
   modelContextWindow: number | null;
   last: ThreadTokenUsageTotals;
 };
+
+export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+
+export type ReadOnlyAccess =
+  | { type: "restricted"; includePlatformDefaults: boolean; readableRoots: string[] }
+  | { type: "fullAccess" };
+
+export type NetworkAccess = "restricted" | "enabled";
+
+export type SandboxPolicy =
+  | { type: "dangerFullAccess" }
+  | { type: "readOnly"; access: ReadOnlyAccess; networkAccess: boolean }
+  | {
+      type: "externalSandbox";
+      networkAccess: NetworkAccess;
+    }
+  | {
+      type: "workspaceWrite";
+      writableRoots: string[];
+      readOnlyAccess: ReadOnlyAccess;
+      networkAccess: boolean;
+      excludeTmpdirEnvVar: boolean;
+      excludeSlashTmp: boolean;
+    };
 
 export type CommandExecTerminalSize = {
   cols: number;
