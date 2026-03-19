@@ -12,3 +12,4 @@
 - Added idle timeout for Pi processes (default 5 min, configurable via `CODAPTER_PI_IDLE_TIMEOUT_MS`).
 - Increased SIGTERM→SIGKILL grace period from 1s to 5s.
 - Removed unused declarations in pi-process.ts (parseModelKey, toImageContent, currentModelId, unnecessary async/await).
+- Extended per-thread state machine (`starting → ready → turn_active → forking → terminating`) with request buffering during `starting`, rejection during `forking`/`terminating`, and debug-level state transition logging.
