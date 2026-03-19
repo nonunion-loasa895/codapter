@@ -33,12 +33,6 @@ interface ManagedSession {
   record: PiBackendSessionRecord;
 }
 
-const TEMP_FORCED_PI_MODEL = {
-  id: "anthropic/claude-opus-4-6",
-  provider: "anthropic",
-  modelId: "claude-opus-4-6",
-} as const;
-
 const DEFAULT_CAPABILITIES: BackendCapabilities = {
   requiresAuth: false,
   supportsImages: true,
@@ -169,7 +163,7 @@ export class PiBackend implements IBackend {
     const record = await this.persistSnapshot(sessionId, snapshot);
     const session = { process, record };
     this.sessions.set(sessionId, session);
-    await this.ensureForcedModel(sessionId, session);
+
     return sessionId;
   }
 
@@ -205,7 +199,6 @@ export class PiBackend implements IBackend {
     const record = await this.persistSnapshot(forkedSessionId, snapshot, source.record.createdAt);
     const session = { process, record };
     this.sessions.set(forkedSessionId, session);
-    await this.ensureForcedModel(forkedSessionId, session);
     return forkedSessionId;
   }
 
@@ -259,7 +252,7 @@ export class PiBackend implements IBackend {
   ): Promise<void> {
     this.assertReady();
     const session = await this.ensureActiveSession(sessionId);
-    await this.ensureForcedModel(sessionId, session);
+
     await session.process.prompt(turnId, text, images);
     session.record = await this.updateRecord(sessionId, {
       updatedAt: nowIso(),
@@ -299,7 +292,6 @@ export class PiBackend implements IBackend {
     this.assertReady();
     const session = await this.ensureActiveSession(sessionId);
     void modelId;
-    await this.ensureForcedModel(sessionId, session);
   }
 
   async getCapabilities(): Promise<BackendCapabilities> {
@@ -393,21 +385,8 @@ export class PiBackend implements IBackend {
     const nextRecord = await this.persistSnapshot(sessionId, snapshot, record.createdAt);
     const session = { process, record: nextRecord };
     this.sessions.set(sessionId, session);
-    await this.ensureForcedModel(sessionId, session);
+
     return session;
-  }
-
-  private async ensureForcedModel(sessionId: string, session: ManagedSession): Promise<void> {
-    if (session.record.modelId === TEMP_FORCED_PI_MODEL.id) {
-      return;
-    }
-
-    await this.resolveModel(TEMP_FORCED_PI_MODEL.id);
-    await session.process.setModel(TEMP_FORCED_PI_MODEL.provider, TEMP_FORCED_PI_MODEL.modelId);
-    session.record = await this.updateRecord(sessionId, {
-      modelId: TEMP_FORCED_PI_MODEL.id,
-      updatedAt: nowIso(),
-    });
   }
 
   private async requireRecord(sessionId: string): Promise<PiBackendSessionRecord> {
