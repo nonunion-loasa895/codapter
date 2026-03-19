@@ -46,11 +46,38 @@ graph TB
 
 ### Prerequisites
 
-- **Node.js 22+**
-- **Pi coding agent** installed and configured with API keys (see [Pi setup](https://github.com/badlogic/pi-mono))
+- **Node.js 22+** ([download](https://nodejs.org/))
 - **Codex Desktop** installed ([download](https://developers.openai.com/codex/app))
+- **API key** for at least one LLM provider (Anthropic, OpenAI, Google, etc.)
 
-### Install & Build
+### 1. Install the Pi Coding Agent
+
+Codapter uses the [Pi coding agent](https://github.com/badlogic/pi-mono) as its backend. Install it globally:
+
+```bash
+npm install -g @mariozechner/pi-coding-agent
+```
+
+> **Note**: Codapter currently invokes Pi via `npx @mariozechner/pi-coding-agent@0.59.0`. A global install ensures the package is cached locally rather than fetched on every session start.
+
+### 2. Configure API Keys
+
+Pi needs API keys for the LLM providers you want to use. Create the auth config:
+
+```bash
+mkdir -p ~/.pi/agent
+cat > ~/.pi/agent/auth.json << 'EOF'
+{
+  "anthropic": { "apiKey": "sk-ant-..." },
+  "openai": { "apiKey": "sk-..." },
+  "google": { "apiKey": "..." }
+}
+EOF
+```
+
+Only include the providers you have keys for. At minimum, one provider is required.
+
+### 3. Install & Build Codapter
 
 ```bash
 git clone <repo-url> codapter
@@ -59,7 +86,7 @@ npm install
 npm run build:dist
 ```
 
-### Run Locally
+### 4. Run Locally
 
 Point Codex Desktop at codapter:
 

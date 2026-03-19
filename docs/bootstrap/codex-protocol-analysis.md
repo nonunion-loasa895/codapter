@@ -24,7 +24,7 @@ Build **codapter** — a protocol adapter that allows the **Codex Desktop GUI** 
 
 - **Platform**: Linux and macOS. Windows is out of scope for v0.1.
 - **Remote mode**: Codapter listens on WebSocket (TCP or UDS). The user is responsible for installing codapter on the remote host and setting up SSH tunneling. There is no automated remote bootstrap/deployment in v0.1.
-- **Wire protocol source of truth**: The Codex app-server protocol types at `upstream/codex/codex-rs/app-server-protocol/schema/typescript/v2/` (pinned as a git submodule). These auto-generated TypeScript types define the exact JSON shapes the GUI expects. All protocol-facing implementation must reference these types, not narrative descriptions in this document.
+- **Wire protocol source of truth**: The Codex app-server protocol types at [codex-rs/app-server-protocol/schema/typescript/v2/](https://github.com/openai/codex/tree/main/codex-rs/app-server-protocol/schema/typescript/v2) in the openai/codex repository. These auto-generated TypeScript types define the exact JSON shapes the GUI expects. All protocol-facing implementation must reference these types, not narrative descriptions in this document.
 
 ### Exploration Artifacts
 
