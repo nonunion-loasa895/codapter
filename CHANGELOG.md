@@ -7,3 +7,8 @@
 - Implemented thread lifecycle, turn streaming, native `command/exec`, and Pi-backed elicitation.
 - Added architecture, API mapping, and integration documentation.
 - Added smoke-test coverage and dist build verification.
+- Added SIGINT/SIGTERM signal handlers to dispose Pi child processes on shutdown.
+- Added `CODAPTER_PI_COMMAND` and `CODAPTER_PI_ARGS` env vars for Pi launch configurability.
+- Added idle timeout for Pi processes (default 5 min, configurable via `CODAPTER_PI_IDLE_TIMEOUT_MS`).
+- Increased SIGTERM→SIGKILL grace period from 1s to 5s.
+- Removed unused declarations in pi-process.ts (parseModelKey, toImageContent, currentModelId, unnecessary async/await).
