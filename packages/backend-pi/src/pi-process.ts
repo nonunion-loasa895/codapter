@@ -114,14 +114,7 @@ function defaultCommand(): string {
 }
 
 function defaultArgs(sessionDir: string): string[] {
-  return [
-    "--yes",
-    "@mariozechner/pi-coding-agent@0.59.0",
-    "--mode",
-    "rpc",
-    "--session-dir",
-    sessionDir,
-  ];
+  return ["--yes", "@mariozechner/pi-coding-agent", "--mode", "rpc", "--session-dir", sessionDir];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
