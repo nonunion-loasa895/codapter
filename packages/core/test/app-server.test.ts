@@ -293,7 +293,7 @@ describe("AppServerConnection", () => {
         },
         {
           method: "account/updated",
-          params: { authMode: "chatgptAuthTokens", planType: "pro" },
+          params: { authMode: "chatgpt", planType: "pro" },
         },
       ])
     );
@@ -308,7 +308,7 @@ describe("AppServerConnection", () => {
       id: 3,
       result: {
         account: { type: "chatgpt", email: "user@example.com", planType: "pro" },
-        requiresOpenaiAuth: false,
+        requiresOpenaiAuth: true,
       },
     });
 
@@ -321,9 +321,9 @@ describe("AppServerConnection", () => {
     ).resolves.toEqual({
       id: 4,
       result: {
-        authMethod: "chatgptAuthTokens",
+        authMethod: "chatgpt",
         authToken: accessToken,
-        requiresOpenaiAuth: false,
+        requiresOpenaiAuth: true,
       },
     });
 
@@ -347,7 +347,7 @@ describe("AppServerConnection", () => {
       id: 6,
       result: {
         account: null,
-        requiresOpenaiAuth: false,
+        requiresOpenaiAuth: true,
       },
     });
 

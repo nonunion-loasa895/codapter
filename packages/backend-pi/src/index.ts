@@ -308,7 +308,8 @@ export class PiBackend implements IBackend {
   async setModel(sessionId: string, modelId: string): Promise<void> {
     this.assertReady();
     const session = await this.ensureActiveSession(sessionId);
-    void modelId;
+    const resolved = await this.resolveModel(modelId);
+    await session.process.setModel(resolved.provider, resolved.modelId);
   }
 
   async getCapabilities(): Promise<BackendCapabilities> {

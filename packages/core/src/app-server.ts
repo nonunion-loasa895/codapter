@@ -26,6 +26,7 @@ import type {
   AccountLoginCompletedNotification,
   AccountUpdatedNotification,
   AppListResponse,
+  AuthMode,
   CancelLoginAccountParams,
   CancelLoginAccountResponse,
   CollaborationModeListResponse,
@@ -41,7 +42,6 @@ import type {
   ConfigValueWriteParams,
   ConfigWriteResponse,
   ExperimentalFeatureListResponse,
-  GetAccountParams,
   GetAccountRateLimitsResponse,
   GetAccountResponse,
   GetAuthStatusResponse,
@@ -883,7 +883,13 @@ export class AppServerConnection {
     string | number,
     PendingToolUserInputRequest
   >();
-  private authState: StoredAuthState | null = { mode: "apikey", apiKey: "codapter" };
+  private authState: StoredAuthState | null = {
+    mode: "chatgptAuthTokens",
+    accessToken: "codapter",
+    accountId: "codapter",
+    email: "codapter@localhost",
+    planType: "pro",
+  };
   private readonly state: ConnectionState = {
     initialized: false,
     initializedNotificationReceived: false,
@@ -1124,6 +1130,14 @@ export class AppServerConnection {
 
     if (message.method === "initialized") {
       this.state.initializedNotificationReceived = true;
+      if (this.authState) {
+        void this.publishAccountLoginCompleted({
+          loginId: null,
+          success: true,
+          error: null,
+        });
+        void this.publishAccountUpdated();
+      }
     }
 
     return null;
@@ -1226,8 +1240,7 @@ export class AppServerConnection {
     return { requirements: null };
   }
 
-  private handleAccountRead(params: unknown): GetAccountResponse {
-    const parsed = (params ?? {}) as Partial<GetAccountParams>;
+  private handleAccountRead(_params: unknown): GetAccountResponse {
     const account =
       this.authState?.mode === "apikey"
         ? { type: "apiKey" as const }
@@ -1240,7 +1253,7 @@ export class AppServerConnection {
           : null;
     return {
       account,
-      requiresOpenaiAuth: Boolean(parsed.refreshToken) && false,
+      requiresOpenaiAuth: true,
     };
   }
 
@@ -1313,10 +1326,16 @@ export class AppServerConnection {
     };
   }
 
+  private get effectiveAuthMode(): AuthMode | null {
+    if (!this.authState) {
+      return null;
+    }
+    return this.authState.mode === "chatgptAuthTokens" ? "chatgpt" : this.authState.mode;
+  }
+
   private handleGetAuthStatus(params: unknown): GetAuthStatusResponse {
     const parsed = (params ?? {}) as { includeToken?: boolean | null } | null;
     const includeToken = Boolean(parsed?.includeToken);
-    const authMethod = this.authState?.mode ?? null;
     const authToken =
       !includeToken || !this.authState
         ? null
@@ -1324,15 +1343,15 @@ export class AppServerConnection {
           ? this.authState.apiKey
           : this.authState.accessToken;
     return {
-      authMethod,
+      authMethod: this.effectiveAuthMode,
       authToken,
-      requiresOpenaiAuth: false,
+      requiresOpenaiAuth: this.authState !== null,
     };
   }
 
   private currentAccountUpdatedNotification(): AccountUpdatedNotification {
     return {
-      authMode: this.authState?.mode ?? null,
+      authMode: this.effectiveAuthMode,
       planType: this.authState?.mode === "chatgptAuthTokens" ? this.authState.planType : null,
     };
   }
@@ -1388,7 +1407,7 @@ export class AppServerConnection {
   private async handleModelList(): Promise<ModelListResponse> {
     const models = this.backend ? await this.backend.listModels() : [];
 
-    return {
+    const response: ModelListResponse = {
       data: models.map((model) => ({
         id: model.id,
         model: model.model,
@@ -1406,6 +1425,16 @@ export class AppServerConnection {
       })),
       nextCursor: null,
     };
+
+    void this.debugLogWriter?.write({
+      at: new Date().toISOString(),
+      component: "app-server",
+      kind: "backend-event",
+      method: "model/list",
+      payload: response,
+    });
+
+    return response;
   }
 
   private async handleThreadStart(params: unknown): Promise<ThreadStartResponse> {
