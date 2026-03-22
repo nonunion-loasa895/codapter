@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
-import type { GitInfo } from "./protocol.js";
+import type { GitInfo, SessionSource } from "./protocol.js";
+
+type StoredSessionSource = Exclude<SessionSource, "appServer"> | { type: "appServer" };
 
 export interface ThreadRegistryLogger {
   warn(message: string, context?: Record<string, unknown>): void;
@@ -12,39 +14,61 @@ export interface ThreadRegistryEntry {
   readonly threadId: string;
   readonly backendSessionId: string;
   readonly backendType: string;
+  readonly ephemeral: boolean;
   readonly hidden: boolean;
   readonly name: string | null;
+  readonly path: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly archived: boolean;
   readonly cwd: string | null;
   readonly preview: string | null;
+  readonly model: string | null;
   readonly modelProvider: string | null;
+  readonly reasoningEffort: string | null;
+  readonly source: StoredSessionSource;
+  readonly agentNickname: string | null;
+  readonly agentRole: string | null;
   readonly gitInfo: GitInfo | null;
 }
 
 export interface CreateThreadRegistryEntry {
+  readonly threadId?: string;
   readonly backendSessionId: string;
   readonly backendType: string;
+  readonly ephemeral?: boolean;
   readonly hidden?: boolean;
   readonly name?: string | null;
+  readonly path?: string | null;
   readonly archived?: boolean;
   readonly cwd?: string | null;
   readonly preview?: string | null;
+  readonly model?: string | null;
   readonly modelProvider?: string | null;
+  readonly reasoningEffort?: string | null;
+  readonly source?: StoredSessionSource;
+  readonly agentNickname?: string | null;
+  readonly agentRole?: string | null;
   readonly gitInfo?: GitInfo | null;
 }
 
 export interface UpdateThreadRegistryEntry {
   readonly backendSessionId?: string;
   readonly backendType?: string;
+  readonly ephemeral?: boolean;
   readonly hidden?: boolean;
   readonly name?: string | null;
+  readonly path?: string | null;
   readonly updatedAt?: string;
   readonly archived?: boolean;
   readonly cwd?: string | null;
   readonly preview?: string | null;
+  readonly model?: string | null;
   readonly modelProvider?: string | null;
+  readonly reasoningEffort?: string | null;
+  readonly source?: StoredSessionSource;
+  readonly agentNickname?: string | null;
+  readonly agentRole?: string | null;
   readonly gitInfo?: GitInfo | null;
 }
 
@@ -77,18 +101,49 @@ function isThreadRegistryEntry(value: unknown): value is ThreadRegistryEntry {
     return false;
   }
 
+  const source = value.source;
+  const validSource =
+    source === undefined ||
+    source === null ||
+    source === "appServer" ||
+    (isRecord(source) && source.type === "appServer") ||
+    (isRecord(source) &&
+      isRecord(source.subAgent) &&
+      isRecord(source.subAgent.thread_spawn) &&
+      typeof source.subAgent.thread_spawn.parent_thread_id === "string" &&
+      typeof source.subAgent.thread_spawn.depth === "number" &&
+      (typeof source.subAgent.thread_spawn.agent_nickname === "string" ||
+        source.subAgent.thread_spawn.agent_nickname === null ||
+        source.subAgent.thread_spawn.agent_nickname === undefined) &&
+      (typeof source.subAgent.thread_spawn.agent_role === "string" ||
+        source.subAgent.thread_spawn.agent_role === null ||
+        source.subAgent.thread_spawn.agent_role === undefined));
+
   return (
     typeof value.threadId === "string" &&
     typeof value.backendSessionId === "string" &&
     typeof value.backendType === "string" &&
+    (typeof value.ephemeral === "boolean" || value.ephemeral === undefined) &&
     (typeof value.hidden === "boolean" || value.hidden === undefined) &&
     (typeof value.name === "string" || value.name === null) &&
+    (typeof value.path === "string" || value.path === null || value.path === undefined) &&
     typeof value.createdAt === "string" &&
     typeof value.updatedAt === "string" &&
     typeof value.archived === "boolean" &&
     (typeof value.cwd === "string" || value.cwd === null) &&
     (typeof value.preview === "string" || value.preview === null) &&
+    (typeof value.model === "string" || value.model === null || value.model === undefined) &&
     (typeof value.modelProvider === "string" || value.modelProvider === null) &&
+    (typeof value.reasoningEffort === "string" ||
+      value.reasoningEffort === null ||
+      value.reasoningEffort === undefined) &&
+    validSource &&
+    (typeof value.agentNickname === "string" ||
+      value.agentNickname === null ||
+      value.agentNickname === undefined) &&
+    (typeof value.agentRole === "string" ||
+      value.agentRole === null ||
+      value.agentRole === undefined) &&
     (isRecord(value.gitInfo) || value.gitInfo === null)
   );
 }
@@ -151,9 +206,20 @@ export class ThreadRegistry {
         });
         continue;
       }
+      const rawSource = (entry as { source?: unknown }).source;
       this.entries.set(entry.threadId, {
         ...entry,
+        ephemeral: entry.ephemeral ?? false,
         hidden: entry.hidden ?? false,
+        path: entry.path ?? null,
+        model: entry.model ?? null,
+        source:
+          rawSource === "appServer" || rawSource === undefined || rawSource === null
+            ? { type: "appServer" }
+            : entry.source,
+        reasoningEffort: entry.reasoningEffort ?? null,
+        agentNickname: entry.agentNickname ?? null,
+        agentRole: entry.agentRole ?? null,
       });
     }
 
@@ -177,17 +243,24 @@ export class ThreadRegistry {
 
     const now = new Date().toISOString();
     const entry: ThreadRegistryEntry = {
-      threadId: randomUUID(),
+      threadId: input.threadId ?? randomUUID(),
       backendSessionId: input.backendSessionId,
       backendType: input.backendType,
+      ephemeral: input.ephemeral ?? false,
       hidden: input.hidden ?? false,
       name: input.name ?? null,
+      path: input.path ?? null,
       createdAt: now,
       updatedAt: now,
       archived: input.archived ?? false,
       cwd: input.cwd ?? null,
       preview: input.preview ?? null,
+      model: input.model ?? null,
       modelProvider: input.modelProvider ?? null,
+      reasoningEffort: input.reasoningEffort ?? null,
+      source: input.source ?? { type: "appServer" },
+      agentNickname: input.agentNickname ?? null,
+      agentRole: input.agentRole ?? null,
       gitInfo: input.gitInfo ?? null,
     };
 

@@ -7,6 +7,7 @@ import type {
   BackendImageInput,
   BackendMessage,
   BackendModelSummary,
+  BackendSessionLaunchConfig,
   BackendTokenUsage,
 } from "@codapter/core";
 import { attachJsonlLineReader, parseJsonLine, serializeJsonLine } from "./jsonl.js";
@@ -19,6 +20,8 @@ export interface PiProcessLaunchOptions {
   readonly args?: readonly string[];
   readonly env?: NodeJS.ProcessEnv;
   readonly cwd?: string;
+  readonly collabExtensionPath?: string | null;
+  readonly launchConfig?: BackendSessionLaunchConfig;
 }
 
 export interface PiProcessResponse<T = unknown> {
@@ -113,8 +116,16 @@ function defaultCommand(): string {
   return "npx";
 }
 
-function defaultArgs(sessionDir: string): string[] {
-  return ["--yes", "@mariozechner/pi-coding-agent", "--mode", "rpc", "--session-dir", sessionDir];
+function defaultArgs(sessionDir: string, collabExtensionPath?: string | null): string[] {
+  return [
+    "--yes",
+    "@mariozechner/pi-coding-agent",
+    "--mode",
+    "rpc",
+    "--session-dir",
+    sessionDir,
+    ...(collabExtensionPath ? ["--extension", collabExtensionPath] : []),
+  ];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -299,6 +310,44 @@ function isToolUseAssistantMessage(message: unknown): boolean {
   return messageRole(message) === "assistant" && messageStopReason(message) === "toolUse";
 }
 
+function textFromUnknown(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value === null || value === undefined) {
+    return "";
+  }
+  return JSON.stringify(value);
+}
+
+function assistantMessageText(message: unknown): string | null {
+  if (!isRecord(message)) {
+    return null;
+  }
+
+  const content = message.content;
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return null;
+  }
+
+  const text = content
+    .map((entry) => {
+      if (!isRecord(entry)) {
+        return textFromUnknown(entry);
+      }
+      if (entry.type === "text" && typeof entry.text === "string") {
+        return entry.text;
+      }
+      return textFromUnknown(entry);
+    })
+    .join("");
+
+  return text.length > 0 ? text : null;
+}
+
 export function mapAvailableModelsToSummaries(models: unknown): BackendModelSummary[] {
   if (!Array.isArray(models)) {
     return [];
@@ -360,9 +409,22 @@ export class PiProcessSession {
     this.opaqueSessionId = options.opaqueSessionId;
     this.command = options.command ?? defaultCommand();
     this.args = options.args
-      ? [...options.args, "--session-dir", options.sessionDir]
-      : defaultArgs(options.sessionDir);
-    this.env = options.env ?? process.env;
+      ? [
+          ...options.args,
+          "--session-dir",
+          options.sessionDir,
+          ...(options.collabExtensionPath ? ["--extension", options.collabExtensionPath] : []),
+        ]
+      : defaultArgs(options.sessionDir, options.collabExtensionPath);
+    this.env = {
+      ...(options.env ?? process.env),
+      ...(options.launchConfig?.collabSocketPath
+        ? { CODAPTER_COLLAB_UDS: options.launchConfig.collabSocketPath }
+        : {}),
+      ...(options.launchConfig?.threadId
+        ? { CODAPTER_COLLAB_PARENT_THREAD: options.launchConfig.threadId }
+        : {}),
+    };
     this.cwd = options.cwd ?? process.cwd();
     const logFilePath = this.env.CODAPTER_DEBUG_LOG_FILE;
     this.logWriter =
@@ -674,11 +736,15 @@ export class PiProcessSession {
         if (isToolUseAssistantMessage(event.message)) {
           return;
         }
-        this.emit({
-          sessionId: this.opaqueSessionId,
-          turnId: this.currentTurnId ?? "unknown",
-          type: "message_end",
-        });
+        {
+          const text = assistantMessageText(event.message);
+          this.emit({
+            sessionId: this.opaqueSessionId,
+            turnId: this.currentTurnId ?? "unknown",
+            type: "message_end",
+            ...(text !== null ? { text } : {}),
+          });
+        }
         return;
       case "tool_execution_start":
         this.emit({

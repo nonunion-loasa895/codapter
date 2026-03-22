@@ -7,9 +7,16 @@ import type {
   BackendEvent,
   BackendImageInput,
   BackendMessage,
+  BackendSessionLaunchConfig,
   Disposable,
   IBackend,
 } from "./backend.js";
+import {
+  CollabManager,
+  type CollabManagerCreateChildThreadInput,
+  type CollabManagerNotificationSink,
+} from "./collab-manager.js";
+import { CollabUdsListener } from "./collab-uds.js";
 import { CommandExecManager } from "./command-exec.js";
 import { InMemoryConfigStore } from "./config-store.js";
 import {
@@ -99,6 +106,7 @@ import {
   type ThreadRegistryEntry,
   type ThreadRegistryLogger,
 } from "./thread-registry.js";
+import { classifyToolName, synthesizeFileChanges } from "./tool-items.js";
 import { TurnStateMachine, toThreadTokenUsage } from "./turn-state.js";
 
 const JSON_RPC_METHOD_NOT_FOUND = -32601;
@@ -114,6 +122,7 @@ const DEFAULT_MODEL_PROVIDER = "pi";
 const INTERNAL_TITLE_THREAD_PROMPT_PREFIX =
   "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task";
 const INTERNAL_TITLE_THREAD_PROMPT_MARKER = "Generate a concise UI title";
+const INTERNAL_TITLE_THREAD_PREVIEW_PREFIX = INTERNAL_TITLE_THREAD_PROMPT_PREFIX.slice(0, 120);
 
 export interface AppServerIdentity {
   readonly userAgent: string;
@@ -134,6 +143,7 @@ export type AppServerOutgoingMessage = JsonRpcEnvelope;
 
 export interface AppServerConnectionOptions {
   readonly backend?: IBackend;
+  readonly collabEnabled?: boolean;
   readonly configStore?: InMemoryConfigStore;
   readonly identity?: AppServerIdentity;
   readonly logger?: AppServerLogger;
@@ -154,12 +164,15 @@ interface ThreadRuntime {
   sessionId: string;
   status: "starting" | "ready" | "turn_active" | "forking" | "terminating";
   activeTurnId: string | null;
+  activeTurnInput: JsonValue[] | null;
   latestTurnId: string | null;
   machine: TurnStateMachine | null;
   subscription: Disposable | null;
   eventQueue: Promise<void>;
   readyResolver: (() => void) | null;
   readyPromise: Promise<void> | null;
+  managedByCollab: boolean;
+  statusOverride: ThreadStatus | null;
 }
 
 interface PendingToolUserInputRequest {
@@ -205,6 +218,25 @@ function readEmulatedIdentityFromToml(): string | null {
   const raw = readFileSync(filePath, "utf8");
   const match = raw.match(/^\s*emulateCodexIdentity\s*=\s*"([^"]+)"\s*$/m);
   return match?.[1] ?? null;
+}
+
+function readStringRecordValue(record: unknown, key: string): string | null {
+  if (typeof record !== "object" || record === null) {
+    return null;
+  }
+  const value = (record as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : null;
+}
+
+function resolveCollaborationModeSetting(
+  collaborationMode: JsonValue | null | undefined,
+  key: string
+): string | null {
+  if (typeof collaborationMode !== "object" || collaborationMode === null) {
+    return null;
+  }
+  const settings = (collaborationMode as Record<string, unknown>).settings;
+  return readStringRecordValue(settings, key);
 }
 
 function createIdentity(): AppServerIdentity {
@@ -397,7 +429,11 @@ function isInternalTitlePrompt(text: string): boolean {
 }
 
 function isInternalTitlePreview(preview: string | null): boolean {
-  return preview?.trim().startsWith(INTERNAL_TITLE_THREAD_PROMPT_PREFIX) ?? false;
+  const normalized = preview?.trim() ?? "";
+  return (
+    normalized.startsWith(INTERNAL_TITLE_THREAD_PROMPT_PREFIX) ||
+    normalized.startsWith(INTERNAL_TITLE_THREAD_PREVIEW_PREFIX)
+  );
 }
 
 function toJsonValueArray(value: unknown): JsonValue[] {
@@ -429,13 +465,7 @@ function commandFromToolArguments(input: unknown): string {
 }
 
 function toolKindFromName(toolName: string): "commandExecution" | "fileChange" | "agentMessage" {
-  if (/bash|shell|command/i.test(toolName)) {
-    return "commandExecution";
-  }
-  if (/edit|write|patch|file/i.test(toolName)) {
-    return "fileChange";
-  }
-  return "agentMessage";
+  return classifyToolName(toolName);
 }
 
 function thinkingSummaryFromSignature(signature: string): string | null {
@@ -503,7 +533,7 @@ function finalizeHistoricalToolItem(item: ThreadItem): void {
 function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
   const turns: Turn[] = [];
   let currentTurn: Turn | null = null;
-  let pendingTools = new Map<string, ThreadItem>();
+  let pendingTools = new Map<string, { item: ThreadItem; toolName: string; input: unknown }>();
 
   const ensureTurn = (id: string) => {
     if (currentTurn) {
@@ -516,16 +546,16 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
       error: null,
     };
     turns.push(currentTurn);
-    pendingTools = new Map<string, ThreadItem>();
+    pendingTools = new Map<string, { item: ThreadItem; toolName: string; input: unknown }>();
     return currentTurn;
   };
 
   const finalizeTurn = () => {
-    for (const item of pendingTools.values()) {
-      finalizeHistoricalToolItem(item);
+    for (const pending of pendingTools.values()) {
+      finalizeHistoricalToolItem(pending.item);
     }
     currentTurn = null;
-    pendingTools = new Map<string, ThreadItem>();
+    pendingTools = new Map<string, { item: ThreadItem; toolName: string; input: unknown }>();
   };
 
   for (const message of history) {
@@ -595,7 +625,7 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
                 ? {
                     type: "fileChange",
                     id: `${message.id}_tool_${index}`,
-                    changes: [],
+                    changes: synthesizeFileChanges(toolName, cwd, block.arguments),
                     status: "inProgress",
                   }
                 : {
@@ -605,7 +635,11 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
                     phase: null,
                   };
           turn.items.push(item);
-          pendingTools.set(toolCallId, item);
+          pendingTools.set(toolCallId, {
+            item,
+            toolName,
+            input: block.arguments,
+          });
           continue;
         }
 
@@ -633,18 +667,19 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
       const blocks = toJsonValueArray(record.content);
       const outputText = textContentFromBlocks(blocks);
       const isError = Boolean(record.isError);
-      const existingItem = pendingTools.get(toolCallId);
-      if (existingItem) {
-        if (existingItem.type === "commandExecution") {
-          existingItem.aggregatedOutput = outputText || existingItem.aggregatedOutput;
-          existingItem.status = isError ? "failed" : "completed";
-          existingItem.exitCode = isError ? 1 : 0;
-          existingItem.durationMs = existingItem.durationMs ?? 0;
-        } else if (existingItem.type === "fileChange") {
-          existingItem.changes = blocks;
-          existingItem.status = isError ? "failed" : "completed";
-        } else if (existingItem.type === "agentMessage") {
-          existingItem.text = outputText;
+      const pending = pendingTools.get(toolCallId);
+      if (pending) {
+        if (pending.item.type === "commandExecution") {
+          pending.item.aggregatedOutput = outputText || pending.item.aggregatedOutput;
+          pending.item.status = isError ? "failed" : "completed";
+          pending.item.exitCode = isError ? 1 : 0;
+          pending.item.durationMs = pending.item.durationMs ?? 0;
+        } else if (pending.item.type === "fileChange") {
+          const changes = synthesizeFileChanges(toolName, cwd, pending.input, record);
+          pending.item.changes = changes.length > 0 ? changes : blocks;
+          pending.item.status = isError ? "failed" : "completed";
+        } else if (pending.item.type === "agentMessage") {
+          pending.item.text = outputText;
         }
         pendingTools.delete(toolCallId);
         continue;
@@ -668,10 +703,11 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
       }
 
       if (toolKind === "fileChange") {
+        const changes = synthesizeFileChanges(toolName, cwd, record, record);
         turn.items.push({
           type: "fileChange",
           id: `${message.id}_toolResult`,
-          changes: blocks,
+          changes: changes.length > 0 ? changes : blocks,
           status: isError ? "failed" : "completed",
         });
         continue;
@@ -703,9 +739,75 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
   return turns;
 }
 
+function toUserMessageContent(input: readonly UserInput[]): JsonValue[] {
+  return input.map((item): JsonValue => {
+    switch (item.type) {
+      case "text":
+        return { type: "text", text: item.text };
+      case "image":
+        return { type: "image", url: item.url };
+      case "localImage":
+        return { type: "localImage", path: item.path };
+      case "skill":
+        return { type: "skill", name: item.name, path: item.path };
+      case "mention":
+        return { type: "mention", name: item.name, path: item.path };
+    }
+  });
+}
+
+function buildTurnsWithRuntimeState(turns: Turn[], runtime?: ThreadRuntime): Turn[] {
+  if (!runtime) {
+    return turns;
+  }
+
+  if (!runtime.machine) {
+    if (!runtime.latestTurnId || turns.length === 0) {
+      return turns;
+    }
+
+    const lastTurn = turns.at(-1);
+    if (!lastTurn || lastTurn.id === runtime.latestTurnId) {
+      return turns;
+    }
+
+    return [...turns.slice(0, -1), { ...lastTurn, id: runtime.latestTurnId }];
+  }
+
+  const snapshot = runtime.machine.snapshot;
+  const activeTurnInput = runtime.activeTurnInput;
+  if (
+    activeTurnInput &&
+    !snapshot.items.some((item) => item.type === "userMessage") &&
+    activeTurnInput.length > 0
+  ) {
+    snapshot.items.unshift({
+      type: "userMessage",
+      id: `${snapshot.id}_user`,
+      content: structuredClone(activeTurnInput),
+    });
+  }
+
+  if (activeTurnInput && turns.length > 0) {
+    const lastTurn = turns.at(-1);
+    const lastUserMessage = lastTurn?.items.find((item) => item.type === "userMessage");
+    if (
+      lastUserMessage &&
+      JSON.stringify(lastUserMessage.content) === JSON.stringify(activeTurnInput)
+    ) {
+      return [...turns.slice(0, -1), snapshot];
+    }
+  }
+
+  return [...turns, snapshot];
+}
+
 function runtimeToThreadStatus(runtime: ThreadRuntime | undefined): ThreadStatus {
   if (!runtime) {
     return { type: "notLoaded" };
+  }
+  if (runtime.statusOverride) {
+    return runtime.statusOverride;
   }
   switch (runtime.status) {
     case "turn_active":
@@ -719,6 +821,22 @@ function runtimeToThreadStatus(runtime: ThreadRuntime | undefined): ThreadStatus
     default:
       return { type: "idle" };
   }
+}
+
+function isSubAgentThreadSource(source: ThreadRegistryEntry["source"]): boolean {
+  return "subAgent" in source;
+}
+
+function threadSourceKinds(source: ThreadRegistryEntry["source"]): string[] {
+  if ("type" in source) {
+    return ["appServer"];
+  }
+
+  if ("thread_spawn" in source.subAgent) {
+    return ["subAgent", "subAgentThreadSpawn"];
+  }
+
+  return ["subAgent"];
 }
 
 function turnErrorFromUnknown(error: unknown) {
@@ -878,6 +996,10 @@ export class AppServerConnection {
     | ((message: AppServerOutgoingMessage) => void | Promise<void>)
     | undefined;
   private readonly commandExecManager: CommandExecManager;
+  private readonly collabEnabled: boolean;
+  private readonly collabManager: CollabManager | null;
+  private readonly collabUdsListener: CollabUdsListener | null;
+  private readonly collabReady: Promise<void>;
   private readonly threadRuntimes = new Map<string, ThreadRuntime>();
   private readonly pendingToolUserInputRequests = new Map<
     string | number,
@@ -912,11 +1034,65 @@ export class AppServerConnection {
     this.threadRegistry =
       options.threadRegistry ?? new ThreadRegistry(undefined, this.logger as ThreadRegistryLogger);
     this.onMessage = options.onMessage;
+    this.collabEnabled = Boolean(options.collabEnabled && this.backend);
     this.commandExecManager = new CommandExecManager({
       onNotification: async (notification) => {
         await this.publish(notification.method, notification.params);
       },
     });
+    if (this.collabEnabled && this.backend) {
+      const notifySink: CollabManagerNotificationSink = {
+        notify: async (method, params, threadId) => {
+          await this.publish(method, params, threadId);
+        },
+      };
+      this.collabManager = new CollabManager({
+        backend: this.backend,
+        notifySink,
+        resolveParentTurnId: (parentThreadId) =>
+          this.threadRuntimes.get(parentThreadId)?.latestTurnId ??
+          this.threadRuntimes.get(parentThreadId)?.activeTurnId ??
+          "unknown",
+        resolveThreadSessionId: (threadId) => {
+          const runtime = this.threadRuntimes.get(threadId);
+          if (!runtime) {
+            throw new Error(`Thread ${threadId} is not loaded`);
+          }
+          return runtime.sessionId;
+        },
+        createSessionLaunchConfig: (threadId) => this.createBackendSessionLaunchConfig(threadId),
+        createChildThread: async (input) => {
+          await this.createCollabChildThread(input);
+        },
+        startChildTurn: async ({ agent, message }) =>
+          await this.startCollabChildTurn(agent, message),
+        onChildAgentEvent: async ({ agent, event }) => {
+          this.enqueueBackendEvent(agent.threadId, event.turnId, event);
+        },
+        onChildAgentStatusChanged: async ({ agent }) => {
+          this.syncCollabRuntimeState(agent);
+          await this.publishThreadStatus(agent.threadId);
+        },
+      });
+      this.collabUdsListener = new CollabUdsListener({
+        collabManager: this.collabManager,
+        validateParentThread: (parentThreadId) => {
+          if (!this.threadRuntimes.has(parentThreadId)) {
+            throw new Error(`Thread ${parentThreadId} is not loaded`);
+          }
+        },
+      });
+      this.collabReady = this.collabUdsListener.start().catch((error) => {
+        this.logger.warn("Failed to start collab UDS listener", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      });
+    } else {
+      this.collabManager = null;
+      this.collabUdsListener = null;
+      this.collabReady = Promise.resolve();
+    }
     void this.debugLogWriter?.write({
       at: new Date().toISOString(),
       component: "app-server",
@@ -925,6 +1101,8 @@ export class AppServerConnection {
   }
 
   async dispose(): Promise<void> {
+    await this.collabUdsListener?.close().catch(() => {});
+    await this.collabManager?.dispose().catch(() => {});
     for (const runtime of this.threadRuntimes.values()) {
       runtime.status = "terminating";
       runtime.readyResolver?.();
@@ -1236,6 +1414,38 @@ export class AppServerConnection {
     return this.configStore.writeBatch(params as ConfigBatchWriteParams);
   }
 
+  private readEffectiveConfig(cwd: string | null): ConfigReadResponse["config"] {
+    return this.configStore.read({ includeLayers: false, cwd }).config;
+  }
+
+  private resolveRequestedModel(
+    cwd: string | null,
+    requestedModel: string | null | undefined,
+    collaborationMode?: JsonValue | null,
+    persistedModel?: string | null
+  ): string | null {
+    return (
+      requestedModel ??
+      resolveCollaborationModeSetting(collaborationMode, "model") ??
+      persistedModel ??
+      this.readEffectiveConfig(cwd).model
+    );
+  }
+
+  private resolveRequestedReasoningEffort(
+    cwd: string | null,
+    requestedEffort: string | null | undefined,
+    collaborationMode?: JsonValue | null,
+    persistedEffort?: string | null
+  ): string | null {
+    return (
+      requestedEffort ??
+      resolveCollaborationModeSetting(collaborationMode, "reasoning_effort") ??
+      persistedEffort ??
+      this.readEffectiveConfig(cwd).model_reasoning_effort
+    );
+  }
+
   private handleConfigRequirementsRead(): ConfigRequirementsReadResponse {
     return { requirements: null };
   }
@@ -1440,16 +1650,33 @@ export class AppServerConnection {
   private async handleThreadStart(params: unknown): Promise<ThreadStartResponse> {
     const backend = this.requireBackend();
     const parsed = params as ThreadStartParams;
-    const sessionId = await backend.createSession();
-    if (parsed.model) {
-      await backend.setModel(sessionId, parsed.model);
+    await this.collabReady;
+    const threadId = randomUUID();
+    const sessionId = await backend.createSession(this.createBackendSessionLaunchConfig(threadId));
+    const sessionPath = await backend.getSessionPath(sessionId);
+    const ephemeral = parsed.ephemeral ?? false;
+    const effectiveModel = this.resolveRequestedModel(parsed.cwd ?? null, parsed.model, null, null);
+    const effectiveReasoningEffort = this.resolveRequestedReasoningEffort(
+      parsed.cwd ?? null,
+      parsed.config?.model_reasoning_effort as string | null | undefined,
+      null,
+      null
+    );
+    if (effectiveModel) {
+      await backend.setModel(sessionId, effectiveModel);
     }
     const entry = await this.threadRegistry.create({
+      threadId,
       backendSessionId: sessionId,
       backendType: "pi",
+      ephemeral,
+      hidden: ephemeral,
+      path: ephemeral ? null : sessionPath,
       cwd: parsed.cwd ?? process.cwd(),
       preview: "",
+      model: effectiveModel,
       modelProvider: parsed.modelProvider ?? DEFAULT_MODEL_PROVIDER,
+      reasoningEffort: effectiveReasoningEffort,
       gitInfo: null,
     });
 
@@ -1461,43 +1688,131 @@ export class AppServerConnection {
     await this.publishThreadStatus(entry.threadId);
     return await this.buildThreadExecutionResponse(
       thread,
-      parsed.model ?? null,
+      entry.model,
+      entry.reasoningEffort,
+      effectiveModel,
       parsed.cwd ?? null,
       parsed.approvalPolicy ?? null,
       parsed.approvalsReviewer ?? null,
-      parsed.sandbox ?? null
+      parsed.sandbox ?? null,
+      effectiveReasoningEffort
     );
   }
 
   private async handleThreadResume(params: unknown): Promise<ThreadResumeResponse> {
     const backend = this.requireBackend();
     const parsed = params as ThreadResumeParams;
-    const entry = await this.getThreadEntry(parsed.threadId);
+    let entry = await this.getThreadEntry(parsed.threadId);
+    const effectiveModel = this.resolveRequestedModel(
+      parsed.cwd ?? entry.cwd,
+      parsed.model,
+      null,
+      entry.model
+    );
+    const effectiveReasoningEffort = this.resolveRequestedReasoningEffort(
+      parsed.cwd ?? entry.cwd,
+      parsed.config?.model_reasoning_effort as string | null | undefined,
+      null,
+      entry.reasoningEffort
+    );
+    const collabAgent = isSubAgentThreadSource(entry.source)
+      ? (this.collabManager?.getAgentByThreadId(parsed.threadId) ?? null)
+      : null;
+    const needsCollabResume =
+      collabAgent?.status === "shutdown" || collabAgent?.status === "errored";
     const existing = this.threadRuntimes.get(parsed.threadId);
-    if (existing) {
-      throw new Error(`Thread ${parsed.threadId} is already loaded (status: ${existing.status})`);
-    }
-
-    const runtime = this.initRuntime(parsed.threadId, entry.backendSessionId);
-
-    try {
-      const sessionId = await backend.resumeSession(entry.backendSessionId);
-      if (parsed.model) {
-        await backend.setModel(sessionId, parsed.model);
+    if (existing && !needsCollabResume) {
+      if (existing.status === "starting" && existing.readyPromise) {
+        await existing.readyPromise;
       }
-      runtime.sessionId = sessionId;
-
-      const history = await backend.readSessionHistory(sessionId);
-      const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
-      this.transitionToReady(parsed.threadId, runtime);
-      await this.publishThreadStatus(parsed.threadId);
+      if (effectiveModel) {
+        await backend.setModel(existing.sessionId, effectiveModel);
+      }
+      const sessionPath = await backend.getSessionPath(existing.sessionId);
+      const resolvedPath = entry.ephemeral ? null : sessionPath;
+      if (
+        entry.path !== resolvedPath ||
+        entry.model !== effectiveModel ||
+        entry.reasoningEffort !== effectiveReasoningEffort
+      ) {
+        entry = await this.threadRegistry.update(parsed.threadId, {
+          path: resolvedPath,
+          model: effectiveModel,
+          reasoningEffort: effectiveReasoningEffort,
+        });
+      }
+      const history = await backend.readSessionHistory(existing.sessionId);
+      const turns = buildTurnsWithRuntimeState(
+        buildTurns(history, entry.cwd ?? process.cwd()),
+        existing
+      );
+      const thread = this.buildThread(entry, turns);
       return await this.buildThreadExecutionResponse(
         thread,
-        parsed.model ?? null,
+        entry.model,
+        entry.reasoningEffort,
+        effectiveModel,
         parsed.cwd ?? null,
         parsed.approvalPolicy ?? null,
         parsed.approvalsReviewer ?? null,
-        parsed.sandbox ?? null
+        parsed.sandbox ?? null,
+        effectiveReasoningEffort
+      );
+    }
+
+    const runtime = existing
+      ? this.prepareRuntimeForResume(parsed.threadId, existing)
+      : this.createRuntime(
+          parsed.threadId,
+          entry.backendSessionId,
+          isSubAgentThreadSource(entry.source)
+        );
+
+    try {
+      await this.collabReady;
+      const sessionId = await backend.resumeSession(
+        entry.backendSessionId,
+        this.createBackendSessionLaunchConfig(parsed.threadId)
+      );
+      if (effectiveModel) {
+        await backend.setModel(sessionId, effectiveModel);
+      }
+      const sessionPath = await backend.getSessionPath(sessionId);
+      runtime.sessionId = sessionId;
+      if (isSubAgentThreadSource(entry.source)) {
+        this.collabManager?.syncExternalResume(parsed.threadId, sessionId);
+      }
+      if (
+        entry.backendSessionId !== sessionId ||
+        entry.path !== sessionPath ||
+        entry.model !== effectiveModel ||
+        entry.reasoningEffort !== effectiveReasoningEffort
+      ) {
+        entry = await this.threadRegistry.update(parsed.threadId, {
+          backendSessionId: sessionId,
+          path: entry.ephemeral ? null : sessionPath,
+          model: effectiveModel,
+          reasoningEffort: effectiveReasoningEffort,
+        });
+      }
+
+      const history = await backend.readSessionHistory(sessionId);
+      this.transitionToReady(parsed.threadId, runtime);
+      const thread = this.buildThread(
+        entry,
+        buildTurnsWithRuntimeState(buildTurns(history, entry.cwd ?? process.cwd()), runtime)
+      );
+      await this.publishThreadStatus(parsed.threadId);
+      return await this.buildThreadExecutionResponse(
+        thread,
+        entry.model,
+        entry.reasoningEffort,
+        effectiveModel,
+        parsed.cwd ?? null,
+        parsed.approvalPolicy ?? null,
+        parsed.approvalsReviewer ?? null,
+        parsed.sandbox ?? null,
+        effectiveReasoningEffort
       );
     } catch (error) {
       runtime.status = "terminating";
@@ -1523,21 +1838,45 @@ export class AppServerConnection {
 
     let forkThreadId: string | null = null;
     try {
-      const sessionId = await backend.forkSession(sourceEntry.backendSessionId);
-      if (parsed.model) {
-        await backend.setModel(sessionId, parsed.model);
+      forkThreadId = randomUUID();
+      await this.collabReady;
+      const effectiveModel = this.resolveRequestedModel(
+        parsed.cwd ?? sourceEntry.cwd,
+        parsed.model,
+        null,
+        sourceEntry.model
+      );
+      const effectiveReasoningEffort = this.resolveRequestedReasoningEffort(
+        parsed.cwd ?? sourceEntry.cwd,
+        parsed.config?.model_reasoning_effort as string | null | undefined,
+        null,
+        sourceEntry.reasoningEffort
+      );
+      const sessionId = await backend.forkSession(
+        sourceEntry.backendSessionId,
+        this.createBackendSessionLaunchConfig(forkThreadId)
+      );
+      const sessionPath = await backend.getSessionPath(sessionId);
+      const ephemeral = parsed.ephemeral ?? false;
+      if (effectiveModel) {
+        await backend.setModel(sessionId, effectiveModel);
       }
       const entry = await this.threadRegistry.create({
+        threadId: forkThreadId,
         backendSessionId: sessionId,
         backendType: sourceEntry.backendType,
+        ephemeral,
+        hidden: ephemeral,
+        path: ephemeral ? null : sessionPath,
         cwd: parsed.cwd ?? sourceEntry.cwd,
         preview: sourceEntry.preview,
+        model: effectiveModel,
         modelProvider: parsed.modelProvider ?? sourceEntry.modelProvider,
+        reasoningEffort: effectiveReasoningEffort,
         name: sourceEntry.name,
         gitInfo: sourceEntry.gitInfo,
       });
 
-      forkThreadId = entry.threadId;
       const forkRuntime = this.initRuntime(entry.threadId, sessionId);
       this.transitionToReady(entry.threadId, forkRuntime);
 
@@ -1547,11 +1886,14 @@ export class AppServerConnection {
       await this.publishThreadStatus(entry.threadId);
       return await this.buildThreadExecutionResponse(
         thread,
-        parsed.model ?? null,
+        entry.model,
+        entry.reasoningEffort,
+        effectiveModel,
         parsed.cwd ?? null,
         parsed.approvalPolicy ?? null,
         parsed.approvalsReviewer ?? null,
-        parsed.sandbox ?? null
+        parsed.sandbox ?? null,
+        effectiveReasoningEffort
       );
     } catch (error) {
       if (forkThreadId) {
@@ -1572,14 +1914,14 @@ export class AppServerConnection {
     const runtime = this.threadRuntimes.get(parsed.threadId);
     const turns =
       parsed.includeTurns && this.backend
-        ? buildTurns(
-            await this.backend.readSessionHistory(entry.backendSessionId),
-            entry.cwd ?? process.cwd()
+        ? buildTurnsWithRuntimeState(
+            buildTurns(
+              await this.backend.readSessionHistory(entry.backendSessionId),
+              entry.cwd ?? process.cwd()
+            ),
+            runtime
           )
         : [];
-    if (runtime?.machine && parsed.includeTurns) {
-      turns.push(runtime.machine.snapshot);
-    }
     return { thread: this.buildThread(entry, turns) };
   }
 
@@ -1616,6 +1958,11 @@ export class AppServerConnection {
           : `${entry.name ?? ""} ${entry.preview ?? ""}`
               .toLowerCase()
               .includes(parsed.searchTerm.toLowerCase())
+      )
+      .filter((entry) =>
+        !parsed.sourceKinds || parsed.sourceKinds.length === 0
+          ? true
+          : threadSourceKinds(entry.source).some((kind) => parsed.sourceKinds?.includes(kind))
       )
       .filter((entry) =>
         !parsed.modelProviders || parsed.modelProviders.length === 0
@@ -1665,6 +2012,17 @@ export class AppServerConnection {
     const backend = this.requireBackend();
     const parsed = params as ThreadArchiveParams;
     const entry = await this.getThreadEntry(parsed.threadId);
+    if (this.collabManager) {
+      const collabAgent = this.collabManager.getAgentByThreadId(parsed.threadId);
+      if (collabAgent) {
+        await this.collabManager.close({
+          parentThreadId: collabAgent.parentThreadId,
+          id: collabAgent.agentId,
+        });
+      } else {
+        await this.collabManager.shutdownByParent(parsed.threadId);
+      }
+    }
     const runtime = this.threadRuntimes.get(parsed.threadId);
     if (runtime) {
       const from = runtime.status;
@@ -1716,13 +2074,27 @@ export class AppServerConnection {
     const runtime = await this.getReadyThreadRuntime(parsed.threadId);
     let entry = await this.getThreadEntry(parsed.threadId);
     const { text, images, preview } = this.normalizeUserInputs(parsed.input);
-    if (parsed.model) {
-      await backend.setModel(runtime.sessionId, parsed.model);
+    const effectiveModel = this.resolveRequestedModel(
+      parsed.cwd ?? entry.cwd,
+      parsed.model,
+      parsed.collaborationMode ?? null,
+      entry.model
+    );
+    const effectiveReasoningEffort = this.resolveRequestedReasoningEffort(
+      parsed.cwd ?? entry.cwd,
+      parsed.effort,
+      parsed.collaborationMode ?? null,
+      entry.reasoningEffort
+    );
+    if (effectiveModel) {
+      await backend.setModel(runtime.sessionId, effectiveModel);
     }
     const threadPatch: {
       hidden?: boolean;
       preview?: string | null;
       cwd?: string | null;
+      model?: string | null;
+      reasoningEffort?: string | null;
     } = {};
     if (!entry.preview && preview) {
       if (isInternalTitlePrompt(text)) {
@@ -1735,12 +2107,19 @@ export class AppServerConnection {
     if (parsed.cwd) {
       threadPatch.cwd = parsed.cwd;
     }
+    if (entry.model !== effectiveModel) {
+      threadPatch.model = effectiveModel;
+    }
+    if (entry.reasoningEffort !== effectiveReasoningEffort) {
+      threadPatch.reasoningEffort = effectiveReasoningEffort;
+    }
     if (Object.keys(threadPatch).length > 0) {
       entry = await this.threadRegistry.update(parsed.threadId, threadPatch);
     }
 
     const turnId = randomUUID();
     const cwd = parsed.cwd ?? entry.cwd ?? process.cwd();
+    const activeTurnInput = toUserMessageContent(parsed.input);
     const machine = new TurnStateMachine(parsed.threadId, turnId, cwd, {
       notify: async (method, payload) => {
         await this.publish(method, payload, parsed.threadId);
@@ -1749,12 +2128,21 @@ export class AppServerConnection {
 
     runtime.status = "turn_active";
     runtime.activeTurnId = turnId;
+    runtime.activeTurnInput = activeTurnInput;
     runtime.latestTurnId = turnId;
     runtime.machine = machine;
     runtime.subscription?.dispose();
-    runtime.subscription = backend.onEvent(runtime.sessionId, (event) => {
-      this.enqueueBackendEvent(parsed.threadId, turnId, event);
-    });
+    const collabAgent = isSubAgentThreadSource(entry.source)
+      ? (this.collabManager?.getAgentByThreadId(parsed.threadId) ?? null)
+      : null;
+    if (collabAgent) {
+      runtime.subscription = null;
+      this.collabManager?.syncExternalTurnStart(parsed.threadId, turnId);
+    } else {
+      runtime.subscription = backend.onEvent(runtime.sessionId, (event) => {
+        this.enqueueBackendEvent(parsed.threadId, turnId, event);
+      });
+    }
 
     await this.publishThreadStatus(parsed.threadId);
     await machine.emitStarted();
@@ -1782,6 +2170,7 @@ export class AppServerConnection {
   private async handleTurnInterrupt(params: unknown): Promise<TurnInterruptResponse> {
     const backend = this.requireBackend();
     const parsed = params as TurnInterruptParams;
+    const entry = await this.getThreadEntry(parsed.threadId);
     const runtime = this.threadRuntimes.get(parsed.threadId);
     if (!runtime || runtime.status !== "turn_active" || runtime.activeTurnId !== parsed.turnId) {
       throw new Error(`No active turn ${parsed.turnId} for thread ${parsed.threadId}`);
@@ -1792,6 +2181,12 @@ export class AppServerConnection {
       await runtime.machine.interrupt();
     }
     await this.finishTurn(parsed.threadId, parsed.turnId);
+    if (
+      isSubAgentThreadSource(entry.source) &&
+      this.collabManager?.getAgentByThreadId(parsed.threadId)
+    ) {
+      this.collabManager?.syncExternalTurnInterrupt(parsed.threadId);
+    }
     return {};
   }
 
@@ -1959,8 +2354,52 @@ export class AppServerConnection {
     }
     runtime.machine = null;
     runtime.activeTurnId = null;
+    runtime.activeTurnInput = null;
     runtime.status = "ready";
+    runtime.statusOverride = null;
     await this.publishThreadStatus(threadId);
+  }
+
+  private syncCollabRuntimeState(agent: {
+    threadId: string;
+    sessionId: string;
+    status: string;
+  }): void {
+    const runtime = this.threadRuntimes.get(agent.threadId);
+    if (!runtime || !runtime.managedByCollab) {
+      return;
+    }
+
+    runtime.sessionId = agent.sessionId;
+
+    // Let the queued child message_end finish the live turn before tearing the machine down.
+    if (
+      (agent.status === "completed" && (!runtime.machine || !runtime.activeTurnId)) ||
+      agent.status === "errored" ||
+      agent.status === "shutdown"
+    ) {
+      runtime.machine = null;
+      runtime.activeTurnId = null;
+      runtime.activeTurnInput = null;
+      runtime.status = "ready";
+      runtime.statusOverride = null;
+    }
+    if (agent.status === "errored" || agent.status === "shutdown") {
+      this.rejectPendingToolUserInputRequests(
+        agent.threadId,
+        `Collab agent thread ${agent.threadId} closed before server request resolved`
+      );
+    }
+  }
+
+  private rejectPendingToolUserInputRequests(threadId: string, message: string): void {
+    for (const [requestId, request] of this.pendingToolUserInputRequests) {
+      if (request.threadId !== threadId) {
+        continue;
+      }
+      this.pendingToolUserInputRequests.delete(requestId);
+      request.reject(new Error(message));
+    }
   }
 
   private normalizeUserInputs(input: readonly UserInput[]): {
@@ -2017,17 +2456,17 @@ export class AppServerConnection {
     return {
       id: entry.threadId,
       preview: entry.preview ?? "",
-      ephemeral: false,
+      ephemeral: entry.ephemeral,
       modelProvider: entry.modelProvider ?? DEFAULT_MODEL_PROVIDER,
       createdAt: toUnixSeconds(entry.createdAt),
       updatedAt: toUnixSeconds(entry.updatedAt),
       status: runtimeToThreadStatus(this.threadRuntimes.get(entry.threadId)),
-      path: null,
+      path: entry.path,
       cwd: entry.cwd ?? process.cwd(),
       cliVersion: ADAPTER_VERSION,
-      source: "appServer",
-      agentNickname: null,
-      agentRole: null,
+      source: "type" in entry.source ? "appServer" : entry.source,
+      agentNickname: entry.agentNickname,
+      agentRole: entry.agentRole,
       gitInfo: entry.gitInfo,
       name: entry.name,
       turns,
@@ -2036,11 +2475,14 @@ export class AppServerConnection {
 
   private async buildThreadExecutionResponse(
     thread: Thread,
+    persistedModel: string | null,
+    persistedReasoningEffort: string | null,
     requestedModel: string | null,
     requestedCwd: string | null,
     requestedApprovalPolicy: string | null,
     requestedApprovalsReviewer: string | null,
-    requestedSandboxMode: SandboxMode | null
+    requestedSandboxMode: SandboxMode | null,
+    requestedReasoningEffort: string | null
   ): Promise<ThreadStartResponse> {
     const models = this.backend ? await this.backend.listModels() : [];
     const defaultModel = models.find((model) => model.isDefault) ?? models[0];
@@ -2048,14 +2490,18 @@ export class AppServerConnection {
 
     return {
       thread,
-      model: requestedModel ?? defaultModel?.model ?? "pi-default",
+      model: requestedModel ?? persistedModel ?? defaultModel?.model ?? "pi-default",
       modelProvider: thread.modelProvider,
       serviceTier: null,
       cwd,
       approvalPolicy: requestedApprovalPolicy ?? DEFAULT_APPROVAL_POLICY,
       approvalsReviewer: requestedApprovalsReviewer ?? DEFAULT_APPROVALS_REVIEWER,
       sandbox: buildSandboxPolicy(requestedSandboxMode, cwd),
-      reasoningEffort: defaultModel?.defaultReasoningEffort ?? null,
+      reasoningEffort:
+        requestedReasoningEffort ??
+        persistedReasoningEffort ??
+        defaultModel?.defaultReasoningEffort ??
+        null,
     };
   }
 
@@ -2085,6 +2531,30 @@ export class AppServerConnection {
   }
 
   private initRuntime(threadId: string, sessionId: string): ThreadRuntime {
+    return this.createRuntime(threadId, sessionId, false);
+  }
+
+  private prepareRuntimeForResume(threadId: string, runtime: ThreadRuntime): ThreadRuntime {
+    const from = runtime.status;
+    runtime.status = "starting";
+    runtime.activeTurnId = null;
+    runtime.activeTurnInput = null;
+    runtime.machine = null;
+    runtime.subscription?.dispose();
+    runtime.subscription = null;
+    runtime.statusOverride = null;
+    runtime.readyPromise = new Promise<void>((resolve) => {
+      runtime.readyResolver = resolve;
+    });
+    this.logTransition(threadId, from, "starting");
+    return runtime;
+  }
+
+  private createRuntime(
+    threadId: string,
+    sessionId: string,
+    managedByCollab: boolean
+  ): ThreadRuntime {
     let readyResolver: (() => void) | null = null;
     const readyPromise = new Promise<void>((resolve) => {
       readyResolver = resolve;
@@ -2093,12 +2563,15 @@ export class AppServerConnection {
       sessionId,
       status: "starting",
       activeTurnId: null,
+      activeTurnInput: null,
       latestTurnId: null,
       machine: null,
       subscription: null,
       eventQueue: Promise.resolve(),
       readyResolver,
       readyPromise,
+      managedByCollab,
+      statusOverride: null,
     };
     this.threadRuntimes.set(threadId, runtime);
     this.logTransition(threadId, "none", "starting");
@@ -2108,6 +2581,7 @@ export class AppServerConnection {
   private transitionToReady(threadId: string, runtime: ThreadRuntime): void {
     const from = runtime.status;
     runtime.status = "ready";
+    runtime.statusOverride = null;
     runtime.readyResolver?.();
     runtime.readyResolver = null;
     runtime.readyPromise = null;
@@ -2137,5 +2611,94 @@ export class AppServerConnection {
       throw new Error("No backend configured");
     }
     return this.backend;
+  }
+
+  get collabSocketPath(): string | null {
+    return this.collabUdsListener?.socketPath ?? null;
+  }
+
+  private createBackendSessionLaunchConfig(threadId: string): BackendSessionLaunchConfig {
+    if (!this.collabEnabled || !this.collabUdsListener) {
+      return {};
+    }
+
+    return {
+      threadId,
+      collabSocketPath: this.collabUdsListener.socketPath,
+    };
+  }
+
+  private async createCollabChildThread(input: CollabManagerCreateChildThreadInput): Promise<void> {
+    const parentEntry = await this.getThreadEntry(input.parentThreadId);
+    const path = this.backend ? await this.backend.getSessionPath(input.sessionId) : null;
+    const entry = await this.threadRegistry.create({
+      threadId: input.threadId,
+      backendSessionId: input.sessionId,
+      backendType: "pi",
+      path,
+      cwd: parentEntry.cwd ?? process.cwd(),
+      preview: input.preview,
+      model: input.model,
+      modelProvider: parentEntry.modelProvider ?? DEFAULT_MODEL_PROVIDER,
+      reasoningEffort: input.reasoningEffort,
+      name: null,
+      source: {
+        subAgent: {
+          thread_spawn: {
+            parent_thread_id: input.parentThreadId,
+            depth: input.depth,
+            agent_nickname: input.nickname,
+            agent_role: input.role,
+          },
+        },
+      },
+      agentNickname: input.nickname,
+      agentRole: input.role,
+      gitInfo: null,
+    });
+    const runtime = this.createRuntime(entry.threadId, input.sessionId, true);
+    this.transitionToReady(entry.threadId, runtime);
+
+    const thread = this.buildThread(entry, []);
+    await this.publish("thread/started", { thread }, entry.threadId);
+    await this.publishThreadStatus(entry.threadId);
+  }
+
+  private async startCollabChildTurn(
+    agent: { threadId: string },
+    message: string
+  ): Promise<string> {
+    const runtime = this.threadRuntimes.get(agent.threadId);
+    if (!runtime) {
+      throw new Error(`Thread ${agent.threadId} is not loaded`);
+    }
+
+    const entry = await this.getThreadEntry(agent.threadId);
+    if (runtime.machine && runtime.activeTurnId) {
+      const interruptedTurnId = runtime.activeTurnId;
+      await runtime.machine.interrupt();
+      await this.finishTurn(agent.threadId, interruptedTurnId);
+    }
+    const turnId = randomUUID();
+    const cwd = entry.cwd ?? process.cwd();
+    const activeTurnInput = toUserMessageContent([
+      { type: "text", text: message, text_elements: [] },
+    ]);
+    const machine = new TurnStateMachine(agent.threadId, turnId, cwd, {
+      notify: async (method, payload) => {
+        await this.publish(method, payload, agent.threadId);
+      },
+    });
+
+    runtime.status = "turn_active";
+    runtime.statusOverride = null;
+    runtime.activeTurnId = turnId;
+    runtime.activeTurnInput = activeTurnInput;
+    runtime.latestTurnId = turnId;
+    runtime.machine = machine;
+    await this.publishThreadStatus(agent.threadId);
+    await machine.emitStarted();
+    await machine.emitUserMessage(activeTurnInput);
+    return turnId;
   }
 }

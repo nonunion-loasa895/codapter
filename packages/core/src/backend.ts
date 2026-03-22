@@ -16,6 +16,7 @@ export interface BackendMessage {
 export interface BackendSessionSummary {
   readonly sessionId: string;
   readonly name: string | null;
+  readonly path: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -95,6 +96,7 @@ export interface BackendToolEndEvent extends BackendBaseEvent {
 
 export interface BackendMessageEndEvent extends BackendBaseEvent {
   readonly type: "message_end";
+  readonly text?: string;
 }
 
 export interface BackendErrorEvent extends BackendBaseEvent {
@@ -128,6 +130,11 @@ export interface Disposable {
   dispose(): void;
 }
 
+export interface BackendSessionLaunchConfig {
+  readonly threadId?: string | null;
+  readonly collabSocketPath?: string | null;
+}
+
 /**
  * Adapter-to-model contract.
  *
@@ -144,13 +151,13 @@ export interface IBackend {
   isAlive(): boolean;
 
   /** Start a new backend session and return its opaque session identifier. */
-  createSession(): Promise<string>;
+  createSession(config?: BackendSessionLaunchConfig): Promise<string>;
 
   /** Reattach to an existing backend session and return the canonical session identifier. */
-  resumeSession(sessionId: string): Promise<string>;
+  resumeSession(sessionId: string, config?: BackendSessionLaunchConfig): Promise<string>;
 
   /** Fork a backend session and return the new opaque session identifier. */
-  forkSession(sessionId: string): Promise<string>;
+  forkSession(sessionId: string, config?: BackendSessionLaunchConfig): Promise<string>;
 
   /** Dispose a backend session when the adapter no longer needs it. */
   disposeSession(sessionId: string): Promise<void>;
@@ -160,6 +167,9 @@ export interface IBackend {
 
   /** Persist a human-readable name for a backend session. */
   setSessionName(sessionId: string, name: string): Promise<void>;
+
+  /** Return the persisted transcript path for a backend session, if any. */
+  getSessionPath(sessionId: string): Promise<string | null>;
 
   /** Submit a user prompt to the backend for the current turn. */
   prompt(

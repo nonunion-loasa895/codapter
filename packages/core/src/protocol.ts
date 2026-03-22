@@ -1,3 +1,4 @@
+import type { CollabAgentToolCallItem } from "./collab-types.js";
 import type { JsonRpcId } from "./jsonrpc.js";
 
 export type ClientInfo = {
@@ -370,7 +371,8 @@ export type ThreadItem =
       exitCode: number | null;
       durationMs: number | null;
     }
-  | { type: "fileChange"; id: string; changes: JsonValue[]; status: string };
+  | { type: "fileChange"; id: string; changes: JsonValue[]; status: string }
+  | CollabAgentToolCallItem;
 
 export type TurnStatus = "completed" | "interrupted" | "failed" | "inProgress";
 
@@ -414,7 +416,18 @@ export type TurnInterruptParams = {
 
 export type TurnInterruptResponse = Record<string, never>;
 
-export type SessionSource = "appServer";
+export type SessionSource =
+  | "appServer"
+  | {
+      subAgent: {
+        thread_spawn: {
+          parent_thread_id: string;
+          depth: number;
+          agent_nickname: string | null;
+          agent_role: string | null;
+        };
+      };
+    };
 
 export type Thread = {
   id: string;

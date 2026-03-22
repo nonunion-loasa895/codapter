@@ -1,0 +1,386 @@
+import { describe, expect, it } from "vitest";
+import type { BackendEvent } from "../src/backend.js";
+import { TurnStateMachine } from "../src/turn-state.js";
+
+function createMachine() {
+  const notifications: Array<{ method: string; params: unknown }> = [];
+  const machine = new TurnStateMachine("thread-1", "turn-1", "/repo", {
+    async notify(method, params) {
+      notifications.push({ method, params });
+    },
+  });
+
+  return { machine, notifications };
+}
+
+describe("TurnStateMachine", () => {
+  it("suppresses collab tool notifications", async () => {
+    const { machine, notifications } = createMachine();
+
+    const events: BackendEvent[] = [
+      {
+        type: "tool_start",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        toolCallId: "tool-1",
+        toolName: "spawn_agent",
+        input: { message: "delegate" },
+      },
+      {
+        type: "tool_update",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        toolCallId: "tool-1",
+        toolName: "spawn_agent",
+        output: { content: [{ type: "text", text: "running" }] },
+        isCumulative: true,
+      },
+      {
+        type: "tool_end",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        toolCallId: "tool-1",
+        toolName: "spawn_agent",
+        output: { content: [{ type: "text", text: "done" }] },
+        isError: false,
+      },
+      {
+        type: "message_end",
+        sessionId: "session-1",
+        turnId: "turn-1",
+      },
+    ];
+
+    for (const event of events) {
+      await machine.handleEvent(event);
+    }
+
+    expect(notifications.some((notification) => notification.method === "item/started")).toBe(
+      false
+    );
+    expect(notifications.some((notification) => notification.method === "item/completed")).toBe(
+      false
+    );
+    expect(
+      notifications.find((notification) => notification.method === "turn/completed")
+    ).toBeTruthy();
+  });
+
+  it("keeps non-collab tool notifications intact", async () => {
+    const { machine, notifications } = createMachine();
+
+    await machine.handleEvent({
+      type: "tool_start",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      input: { command: ["echo", "hi"] },
+    });
+    await machine.handleEvent({
+      type: "tool_update",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      output: { content: [{ type: "text", text: "hi" }] },
+      isCumulative: true,
+    });
+    await machine.handleEvent({
+      type: "tool_end",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      output: { content: [{ type: "text", text: "hi" }] },
+      isError: false,
+    });
+
+    expect(notifications.find((notification) => notification.method === "item/started")).toEqual(
+      expect.objectContaining({
+        method: "item/started",
+      })
+    );
+    expect(notifications.find((notification) => notification.method === "item/completed")).toEqual(
+      expect.objectContaining({
+        method: "item/completed",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "commandExecution",
+            aggregatedOutput: null,
+          }),
+        }),
+      })
+    );
+  });
+
+  it("retains command output in the final turn snapshot after suppressing duplicate live completion output", async () => {
+    const { machine } = createMachine();
+
+    await machine.handleEvent({
+      type: "tool_start",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      input: { command: "pwd" },
+    });
+    await machine.handleEvent({
+      type: "tool_update",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      output: { content: [{ type: "text", text: "/repo\n" }] },
+      isCumulative: true,
+    });
+    await machine.handleEvent({
+      type: "tool_end",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      output: { content: [{ type: "text", text: "/repo\n" }] },
+      isError: false,
+    });
+    const turn = await machine.handleEvent({
+      type: "message_end",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      text: "done",
+    });
+
+    expect(turn).toMatchObject({
+      items: [
+        {
+          type: "commandExecution",
+          aggregatedOutput: "/repo\n",
+          status: "completed",
+        },
+        {
+          type: "agentMessage",
+          text: "done",
+        },
+      ],
+      status: "completed",
+    });
+  });
+
+  it("hydrates file changes for write tools and emits final output deltas on tool_end", async () => {
+    const { machine, notifications } = createMachine();
+
+    await machine.handleEvent({
+      type: "tool_start",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "write",
+      input: {
+        path: "test.txt",
+        content: "hello\n",
+      },
+    });
+    await machine.handleEvent({
+      type: "tool_end",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "write",
+      output: {
+        content: [{ type: "text", text: "Successfully wrote 6 bytes to test.txt" }],
+      },
+      isError: false,
+    });
+
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/started",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "fileChange",
+            changes: [
+              {
+                path: "/repo/test.txt",
+                kind: { type: "add" },
+                diff: "hello\n",
+              },
+            ],
+          }),
+        }),
+      })
+    );
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/fileChange/outputDelta",
+        params: expect.objectContaining({
+          delta: "Successfully wrote 6 bytes to test.txt",
+        }),
+      })
+    );
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/completed",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "fileChange",
+            status: "completed",
+          }),
+        }),
+      })
+    );
+  });
+
+  it("hydrates edit tools with add/remove diff markers and normalizes numbered output diffs", async () => {
+    const { machine, notifications } = createMachine();
+
+    await machine.handleEvent({
+      type: "tool_start",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "edit",
+      input: {
+        path: "test.txt",
+        oldText: "old line",
+        newText: "new line",
+      },
+    });
+
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/started",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "fileChange",
+            changes: [
+              {
+                path: "/repo/test.txt",
+                kind: { type: "update" },
+                diff: "@@ -1,1 +1,1 @@\n-old line\n+new line",
+              },
+            ],
+          }),
+        }),
+      })
+    );
+
+    await machine.handleEvent({
+      type: "tool_end",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "edit",
+      output: {
+        content: [{ type: "text", text: "Successfully replaced text in /repo/test.txt." }],
+        details: {
+          firstChangedLine: 2,
+          diff: " 1 keep\n-2 old line\n+2 new line\n 3 keep",
+        },
+      },
+      isError: false,
+    });
+
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/completed",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "fileChange",
+            changes: [
+              {
+                path: "/repo/test.txt",
+                kind: { type: "update" },
+                diff: "@@ -2,1 +2,1 @@\n-old line\n+new line",
+              },
+            ],
+            status: "completed",
+          }),
+        }),
+      })
+    );
+  });
+
+  it("hydrates edit tools that append lines as unified diffs with additions", async () => {
+    const { machine, notifications } = createMachine();
+
+    await machine.handleEvent({
+      type: "tool_start",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "edit",
+      input: {
+        path: "test.txt",
+        oldText: "line five",
+        newText: "line five\nline six",
+      },
+    });
+    await machine.handleEvent({
+      type: "tool_end",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "edit",
+      output: {
+        content: [{ type: "text", text: "Successfully replaced text in /repo/test.txt." }],
+        details: {
+          firstChangedLine: 5,
+          diff: "   ...\n+6 line six",
+        },
+      },
+      isError: false,
+    });
+
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/completed",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "fileChange",
+            changes: [
+              {
+                path: "/repo/test.txt",
+                kind: { type: "update" },
+                diff: "@@ -5,1 +5,2 @@\n line five\n+line six",
+              },
+            ],
+          }),
+        }),
+      })
+    );
+  });
+
+  it("creates a final agent message item from message_end text when no deltas arrived", async () => {
+    const { machine, notifications } = createMachine();
+
+    await machine.handleEvent({
+      type: "message_end",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      text: "final response",
+    });
+
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/started",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "agentMessage",
+            text: "final response",
+          }),
+        }),
+      })
+    );
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/completed",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "agentMessage",
+            text: "final response",
+          }),
+        }),
+      })
+    );
+  });
+});

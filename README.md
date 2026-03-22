@@ -76,6 +76,9 @@ Or run codapter directly for testing:
 # Stdio mode (how Codex Desktop spawns it)
 node dist/codapter.mjs app-server
 
+# Stdio mode with collab sub-agent support enabled via env var
+CODAPTER_COLLAB=1 node dist/codapter.mjs app-server
+
 # WebSocket mode (for remote connections)
 node dist/codapter.mjs app-server --listen ws://127.0.0.1:9234
 
@@ -232,6 +235,7 @@ Output is capped at 1MB per stream by default (configurable via `outputBytesCap`
 |----------|-------------|---------|
 | `CODEX_CLI_PATH` | Set this to codapter's path so Codex Desktop uses it | — |
 | `CODAPTER_LISTEN` | Comma-separated listener URIs (alternative to `--listen`) | *(stdio)* |
+| `CODAPTER_COLLAB` | Enable collab sub-agent support (alternative to `--collab`) | *(disabled)* |
 | `CODAPTER_PI_COMMAND` | Override the command used to launch Pi | `npx` |
 | `CODAPTER_PI_ARGS` | Override Pi launch args (JSON array string); `--session-dir` is always appended | `["--yes","@mariozechner/pi-coding-agent","--mode","rpc"]` |
 | `CODAPTER_PI_IDLE_TIMEOUT_MS` | Idle timeout before Pi processes are gracefully stopped (ms; 0 disables) | `300000` (5 min) |
@@ -518,13 +522,19 @@ CODEX_SPARKLE_ENABLED=false /Applications/Codex.app/Contents/MacOS/Codex
 
 ## Limitations
 
-- **No sub-agents**: Pi doesn't support collaborative/sub-agent workflows
+- **Collab requires adapter support**: collab/sub-agent workflows require starting codapter with `--collab` or `CODAPTER_COLLAB=1`
 - **No MCP tools**: MCP server integration is not available through Pi
 - **No realtime/voice**: Pi has no voice API
 - **No worktree management**: Git worktree RPCs return method-not-found (planned as future adapter-native feature)
 - **No PTY mode**: `command/exec` with `tty: true` is rejected
 - **Single instance per state directory**: Multi-window concurrent writes to the thread registry are not locked in v0.1
 - **Config not persisted**: Settings changed through the GUI are lost when the adapter restarts
+
+## Roadmap
+
+- Support additional backends, including Codex
+- Support additional upstream clients and protocols beyond the current Codex Desktop app-server flow
+- Align adapter types with upstream Codex and `pi-mono` definitions instead of maintaining local copies
 
 ## License
 
