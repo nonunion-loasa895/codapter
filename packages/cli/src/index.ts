@@ -15,7 +15,7 @@ import {
 } from "@codapter/core";
 import { type RawData, type WebSocket, WebSocketServer } from "ws";
 
-const VERSION = "0.0.1";
+const VERSION = "0.0.2";
 const ANALYTICS_FLAG = "--analytics-default-enabled";
 
 function envFlagEnabled(value: string | undefined): boolean {
