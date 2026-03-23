@@ -10,7 +10,7 @@ Scope:
 Status:
 - `turn/start`, `turn/interrupt`, thread lifecycle RPCs, and adapter-native `command/exec` are implemented.
 - Pi session lifecycle, prompt/abort, model listing, and token usage reporting are implemented in `backend-pi`.
-- Elicitation is partially implemented at the backend layer, but not surfaced as a Codex app-server server-request flow yet.
+- Pi-backed elicitation is fully implemented: the adapter sends `item/tool/requestUserInput` server-requests to the GUI and resolves responses through the backend.
 - Worktree RPCs are not implemented and currently fall through to `Method not found`.
 
 ## Transport And Handshake
@@ -36,7 +36,7 @@ Status:
 | `getAuthStatus` | `AppServerConnection.handleGetAuthStatus()` | Supported for compatibility. |
 | `skills/list` | `AppServerConnection.handleSkillsList()` | Currently returns an empty payload unless the backend provides data. |
 | `plugin/list` | `AppServerConnection.handlePluginList()` | Currently returns an empty payload unless the backend provides data. |
-| Adapter identity | `packages/core/src/app-server.ts` | Derived from env/TOML override or `codapter/0.0.1`, with platform detection. |
+| Adapter identity | `packages/core/src/app-server.ts` | Derived from env/TOML override or `codapter/0.0.2`, with platform detection. |
 
 ## Threads
 
@@ -122,7 +122,7 @@ Behavior notes:
 | Codex concept | Current state | Notes |
 | --- | --- | --- |
 | Worktree RPCs (`create-worktree`, `delete-worktree`, `resolve-worktree-for-thread`, `worktree-cleanup-inputs`) | Not implemented | They currently return `Method not found`. |
-| Elicitation server requests (`item/tool/requestUserInput`, `mcpServer/elicitation/request`) | Partially implemented | Pi-backed `item/tool/requestUserInput` is implemented. MCP server elicitation is still unsupported. |
+| Elicitation server requests (`item/tool/requestUserInput`, `mcpServer/elicitation/request`) | Pi-backed elicitation implemented | `item/tool/requestUserInput` is fully wired as a server-request round-trip. MCP server elicitation is still unsupported. |
 | Legacy `codex/event/*` compatibility | Not implemented as a public surface | The current implementation targets the typed app-server surface instead. |
 | Remote deployment flow | Supported only through the CLI listener transport | There is no separate remote orchestration layer in codapter. |
 

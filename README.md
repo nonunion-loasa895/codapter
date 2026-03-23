@@ -244,7 +244,7 @@ Output is capped at 1MB per stream by default (configurable via `outputBytesCap`
 
 ### Config Store
 
-The adapter maintains an in-memory config store that responds to `config/read` and `config/value/write` RPCs. Values persist for the lifetime of the adapter process but are **not saved to disk**. This keeps the Codex Desktop settings UI functional without interfering with backend configuration.
+The adapter maintains a config store that responds to `config/read` and `config/value/write` RPCs. Values are persisted to `~/.config/codapter/config.toml`, so settings like model selection and reasoning effort survive adapter restarts.
 
 ### Pi Backend Configuration
 
@@ -280,8 +280,14 @@ The Pi backend uses its own configuration at `~/.pi/agent/`:
 | `command/exec` | Execute shell commands (adapter-native) |
 | `command/exec/write` | Write to process stdin |
 | `command/exec/terminate` | Kill running process |
+| `command/exec/resize` | Resize terminal (accepted; no-op without PTY) |
+| `account/login/start` | API key or ChatGPT token login |
+| `account/login/cancel` | Cancel login flow |
+| `account/logout` | Logout and clear auth state |
+| `account/rateLimits/read` | Rate limit snapshot |
 | `skills/list` | Returns empty list |
 | `plugin/list` | Returns empty list |
+| `app/list` | Returns empty list |
 
 ### Stubbed (Return Empty/Default)
 
@@ -410,9 +416,11 @@ codapter/
 │   │   └── src/
 │   │       ├── app-server.ts       # Main JSON-RPC handler
 │   │       ├── backend.ts          # IBackend interface & event types
+│   │       ├── collab-manager.ts   # Sub-agent collaboration orchestration
+│   │       ├── collab-uds.ts       # UDS listener for collab communication
 │   │       ├── turn-state.ts       # Turn state machine & event decomposition
 │   │       ├── thread-registry.ts  # Persistent thread storage
-│   │       ├── config-store.ts     # In-memory config
+│   │       ├── config-store.ts     # Config with disk persistence
 │   │       ├── command-exec.ts     # Adapter-native shell execution
 │   │       ├── jsonrpc.ts          # JSON-RPC message types
 │   │       ├── ndjson.ts           # NDJSON framing
@@ -423,6 +431,9 @@ codapter/
 │   │       ├── pi-process.ts       # Pi child process management
 │   │       ├── state-store.ts      # Session-to-file mapping
 │   │       └── jsonl.ts            # JSONL line reader
+│   ├── collab-extension/      # Pi extension for sub-agent collaboration
+│   │   └── src/
+│   │       └── index.ts            # Collab tool definitions (spawn/send/wait/close)
 │   └── cli/                   # CLI entry point & transports
 │       └── src/
 │           ├── index.ts            # Listener setup (stdio/WS/UDS)
@@ -436,7 +447,10 @@ codapter/
 │   ├── integration.md
 │   └── bootstrap/                  # Design & planning docs
 ├── scripts/
-│   └── build-dist.mjs             # esbuild bundler
+│   ├── build-dist.mjs             # esbuild bundler
+│   ├── stdio-tap.mjs             # JSON-RPC traffic interceptor/logger
+│   ├── pi.sh                     # Pi launcher script
+│   └── codex.sh                  # Codex launcher script
 ├── test/                      # Smoke tests
 ├── package.json
 ├── tsconfig.base.json
@@ -528,7 +542,7 @@ CODEX_SPARKLE_ENABLED=false /Applications/Codex.app/Contents/MacOS/Codex
 - **No worktree management**: Git worktree RPCs return method-not-found (planned as future adapter-native feature)
 - **No PTY mode**: `command/exec` with `tty: true` is rejected
 - **Single instance per state directory**: Multi-window concurrent writes to the thread registry are not locked in v0.1
-- **Config not persisted**: Settings changed through the GUI are lost when the adapter restarts
+- **Limited config persistence**: Only `model` and `model_reasoning_effort` are persisted to disk (`~/.config/codapter/config.toml`); other settings changed through the GUI are reset when the adapter restarts
 
 ## Roadmap
 

@@ -66,7 +66,7 @@ Environment override:
 ## Transport Notes
 
 - Stdio uses NDJSON line framing.
-- WebSocket transport serves the same JSON-RPC surface over `/rpc`.
+- WebSocket transport serves the same JSON-RPC surface on the root `/` endpoint.
 - WebSocket listeners also expose `/healthz` and `/readyz`.
 - Unix domain socket listeners create parent directories as needed and remove stale sockets on startup.
 - Incoming WebSocket connections with an `Origin` header are rejected.

@@ -69,6 +69,16 @@ The adapter-owned registry is the source of truth for thread metadata.
 - Process ids are connection-scoped.
 - Closing the connection terminates any tracked command processes.
 
+### Sub-Agent Collaboration
+
+When `--collab` (or `CODAPTER_COLLAB=1`) is enabled, codapter supports multi-agent collaboration through the Codex Desktop sub-agent UI.
+
+- `packages/core/src/collab-manager.ts` orchestrates child agent lifecycle: spawn, send input, wait, close, and resume.
+- `packages/core/src/collab-uds.ts` opens an internal Unix domain socket that child Pi processes connect to for collab RPCs.
+- `packages/collab-extension/src/index.ts` is a Pi extension loaded into child processes. It registers `spawn_agent`, `send_input`, `wait_agent`, `close_agent`, and `resume_agent` tools that communicate with the collab manager over the UDS.
+- Child threads appear in the thread registry and emit their own item notifications, with ownership tracked per agent.
+- The parent turn's tool call blocks until the child agent completes or is explicitly closed.
+
 ## Backend-Pi
 
 `packages/backend-pi` is a process-backed Pi adapter.
@@ -80,7 +90,7 @@ The adapter-owned registry is the source of truth for thread metadata.
 
 ## Current Limitations
 
-- Pi-backed elicitation is wired through outbound `item/tool/requestUserInput` server requests, but MCP server elicitation is still unsupported.
+- Pi-backed elicitation is fully implemented through `item/tool/requestUserInput` server-request round-trips. MCP server elicitation is still unsupported.
 - Tool translation is heuristic-based for non-command/file-change tools.
 - The implementation is intentionally backend-specific to Pi for now.
 - Remote/Desktop end-to-end validation is still a separate integration step.
