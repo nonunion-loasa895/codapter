@@ -412,6 +412,20 @@ describe("PiBackend", () => {
       notifications.some(
         (event) =>
           event.method === "item/started" &&
+          (event.params as { item?: { type?: string } }).item?.type === "userMessage"
+      )
+    ).toBe(false);
+    expect(
+      notifications.some(
+        (event) =>
+          event.method === "item/completed" &&
+          (event.params as { item?: { type?: string } }).item?.type === "userMessage"
+      )
+    ).toBe(false);
+    expect(
+      notifications.some(
+        (event) =>
+          event.method === "item/started" &&
           (event.params as { item?: { type?: string } }).item?.type === "commandExecution"
       )
     ).toBe(true);

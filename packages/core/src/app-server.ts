@@ -486,6 +486,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function backendEventTurnId(event: BackendAppServerEvent): string | null {
+  if (!("params" in event) || !isRecord(event.params)) {
+    return null;
+  }
+  if (typeof event.params.turnId === "string") {
+    return event.params.turnId;
+  }
+  if (isRecord(event.params.turn) && typeof event.params.turn.id === "string") {
+    return event.params.turn.id;
+  }
+  return null;
+}
+
 export class AppServerConnection {
   private readonly backendRouter: BackendRouter;
   private readonly configStore: InMemoryConfigStore;
@@ -1770,10 +1783,7 @@ export class AppServerConnection {
 
   private async handleBackendEvent(threadId: string, event: BackendAppServerEvent): Promise<void> {
     const runtime = this.threadRuntimes.get(threadId);
-    const turnId =
-      "params" in event && isRecord(event.params) && typeof event.params.turnId === "string"
-        ? event.params.turnId
-        : null;
+    const turnId = backendEventTurnId(event);
     await this.debugLogWriter?.write({
       at: new Date().toISOString(),
       component: "app-server",

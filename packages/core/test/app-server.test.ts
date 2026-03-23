@@ -4104,6 +4104,96 @@ describe("AppServerConnection", () => {
     });
   });
 
+  it("allows Pi follow-up turns after completion and omits completed turn items in notifications", async () => {
+    const notifications: Array<Record<string, unknown>> = [];
+    const backend = new TestBackend(async ({ sessionId, turnId }) => {
+      queueMicrotask(() => {
+        backend.emit(sessionId, {
+          type: "text_delta",
+          sessionId,
+          turnId,
+          delta: "hello",
+        });
+        backend.emit(sessionId, {
+          type: "message_end",
+          sessionId,
+          turnId,
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      onMessage(message) {
+        notifications.push(message as Record<string, unknown>);
+      },
+    });
+
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    const started = (await connection.handleMessage({
+      id: 2,
+      method: "thread/start",
+      params: {
+        cwd: "/repo",
+        experimentalRawEvents: false,
+        persistExtendedHistory: false,
+      },
+    })) as { result: { thread: { id: string } } };
+    const threadId = started.result.thread.id;
+
+    await connection.handleMessage({
+      id: 3,
+      method: "turn/start",
+      params: {
+        threadId,
+        input: [{ type: "text", text: "first", text_elements: [] }],
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const completed = notifications.find(
+      (message) =>
+        message.method === "turn/completed" &&
+        isRecord(message.params) &&
+        message.params.threadId === threadId
+    );
+    expect(completed).toMatchObject({
+      method: "turn/completed",
+      params: {
+        threadId,
+        turn: {
+          items: [],
+        },
+      },
+    });
+
+    await expect(
+      connection.handleMessage({
+        id: 4,
+        method: "turn/start",
+        params: {
+          threadId,
+          input: [{ type: "text", text: "second", text_elements: [] }],
+        },
+      })
+    ).resolves.toMatchObject({
+      id: 4,
+      result: {
+        turn: {
+          items: [],
+        },
+      },
+    });
+  });
+
   it("uses backend turn ids in turn/start responses for proxied backends", async () => {
     const backend = new CodexProxyTestBackend();
     const connection = new AppServerConnection({
