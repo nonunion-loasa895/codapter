@@ -4,12 +4,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AppServerConnection } from "../src/app-server.js";
-import type { BackendEvent, BackendMessage, IBackend } from "../src/backend.js";
+import { parseBackendModelId } from "../src/backend.js";
+import type {
+  BackendAppServerEvent,
+  BackendEvent,
+  BackendMessage,
+  IBackend,
+} from "../src/backend.js";
 import { InMemoryConfigStore } from "../src/config-store.js";
 import { ThreadRegistry } from "../src/thread-registry.js";
+import { TurnStateMachine, toThreadTokenUsage } from "../src/turn-state.js";
 
 class TestBackend implements IBackend {
-  private readonly listeners = new Map<string, Set<(event: BackendEvent) => void>>();
+  public readonly backendType = "pi";
+  private readonly listeners = new Map<string, Set<(event: BackendAppServerEvent) => void>>();
+  private readonly machines = new Map<string, TurnStateMachine>();
+  private readonly eventPipelines = new Map<string, Promise<void>>();
+  private readonly threadIdsBySession = new Map<string, string>();
   private readonly activeTurns = new Map<string, string>();
   private sessionCounter = 0;
   public readonly sessionHistories = new Map<string, BackendMessage[]>();
@@ -33,6 +44,17 @@ class TestBackend implements IBackend {
 
   isAlive() {
     return true;
+  }
+
+  parseModelSelection(model: string | null | undefined) {
+    if (!model) {
+      return null;
+    }
+    const parsed = parseBackendModelId(model);
+    if (!parsed) {
+      return null;
+    }
+    return parsed.backendType === this.backendType ? parsed : null;
   }
 
   async createSession() {
@@ -64,10 +86,11 @@ class TestBackend implements IBackend {
   }
 
   async abort(sessionId: string) {
+    const turnId = this.activeTurns.get(sessionId) ?? "ignored";
     this.emit(sessionId, {
       type: "message_end",
       sessionId,
-      turnId: "ignored",
+      turnId,
     });
   }
 
@@ -123,8 +146,140 @@ class TestBackend implements IBackend {
     }
   }
 
-  onEvent(sessionId: string, listener: (event: BackendEvent) => void) {
-    const listeners = this.listeners.get(sessionId) ?? new Set<(event: BackendEvent) => void>();
+  async threadStart(input: {
+    threadId: string;
+    cwd: string;
+    model: string | null;
+    reasoningEffort: string | null;
+  }) {
+    const sessionId = await this.createSession();
+    this.threadIdsBySession.set(sessionId, input.threadId);
+    if (input.model) {
+      await this.setModel(sessionId, input.model);
+    }
+    return {
+      threadHandle: sessionId,
+      path: await this.getSessionPath(sessionId),
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+    };
+  }
+
+  async threadResume(input: {
+    threadId: string;
+    threadHandle: string;
+    model: string | null;
+    reasoningEffort: string | null;
+  }) {
+    const sessionId = await this.resumeSession(input.threadHandle);
+    this.threadIdsBySession.set(sessionId, input.threadId);
+    if (input.model) {
+      await this.setModel(sessionId, input.model);
+    }
+    return {
+      threadHandle: sessionId,
+      path: await this.getSessionPath(sessionId),
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+    };
+  }
+
+  async threadFork(input: {
+    threadId: string;
+    sourceThreadHandle: string;
+    model: string | null;
+    reasoningEffort: string | null;
+  }) {
+    const sessionId = await this.forkSession(input.sourceThreadHandle);
+    this.threadIdsBySession.set(sessionId, input.threadId);
+    if (input.model) {
+      await this.setModel(sessionId, input.model);
+    }
+    return {
+      threadHandle: sessionId,
+      path: await this.getSessionPath(sessionId),
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+    };
+  }
+
+  async threadRead(input: { threadHandle: string; includeTurns: boolean }) {
+    const history = await this.readSessionHistory(input.threadHandle);
+    const turns = input.includeTurns ? historyToTurns(history, "/repo") : [];
+    return {
+      threadHandle: input.threadHandle,
+      title: null,
+      model: null,
+      turns,
+    };
+  }
+
+  async threadArchive(input: { threadHandle: string }) {
+    await this.disposeSession(input.threadHandle);
+  }
+
+  async threadSetName(input: { threadHandle: string; name: string }) {
+    await this.setSessionName(input.threadHandle, input.name);
+  }
+
+  async turnStart(input: {
+    threadId: string;
+    threadHandle: string;
+    turnId: string;
+    cwd: string;
+    input: Array<{ type: string; text?: string }>;
+    model?: string | null;
+  }) {
+    this.threadIdsBySession.set(input.threadHandle, input.threadId);
+    if (input.model) {
+      await this.setModel(input.threadHandle, input.model);
+    }
+    const machine = new TurnStateMachine(input.threadId, input.turnId, input.cwd, {
+      notify: async (method, params) => {
+        this.dispatchEvent(input.threadHandle, {
+          kind: "notification",
+          threadHandle: input.threadHandle,
+          method,
+          params,
+        });
+      },
+    });
+    this.machines.set(input.threadHandle, machine);
+    await machine.emitStarted();
+    await machine.emitUserMessage(
+      input.input.map((entry) => ({ type: "text", text: entry.text ?? "" }))
+    );
+    const text = input.input
+      .filter((entry) => entry.type === "text" && typeof entry.text === "string")
+      .map((entry) => entry.text ?? "")
+      .join("\n");
+    await this.prompt(input.threadHandle, input.turnId, text);
+    return { accepted: true as const };
+  }
+
+  async turnInterrupt(input: { threadHandle: string; turnId: string }) {
+    await this.abort(input.threadHandle);
+    const machine = this.machines.get(input.threadHandle);
+    if (machine) {
+      await machine.interrupt();
+      this.machines.delete(input.threadHandle);
+    }
+    if (this.activeTurns.get(input.threadHandle) === input.turnId) {
+      this.activeTurns.delete(input.threadHandle);
+    }
+  }
+
+  async resolveServerRequest(input: {
+    threadHandle: string;
+    requestId: string | number;
+    response: unknown;
+  }) {
+    await this.respondToElicitation(input.threadHandle, String(input.requestId), input.response);
+  }
+
+  onEvent(sessionId: string, listener: (event: BackendAppServerEvent) => void) {
+    const listeners =
+      this.listeners.get(sessionId) ?? new Set<(event: BackendAppServerEvent) => void>();
     listeners.add(listener);
     this.listeners.set(sessionId, listeners);
     return {
@@ -135,6 +290,72 @@ class TestBackend implements IBackend {
   }
 
   emit(sessionId: string, event: BackendEvent) {
+    if (event.type === "token_usage") {
+      this.dispatchEvent(sessionId, {
+        kind: "notification",
+        threadHandle: sessionId,
+        method: "thread/tokenUsage/updated",
+        params: {
+          threadId: this.threadIdsBySession.get(sessionId) ?? sessionId,
+          turnId: event.turnId,
+          tokenUsage: toThreadTokenUsage(event.usage),
+        },
+      });
+      return;
+    }
+
+    if (event.type === "elicitation_request") {
+      this.dispatchEvent(sessionId, {
+        kind: "serverRequest",
+        threadHandle: sessionId,
+        requestId: event.requestId,
+        method: "item/tool/requestUserInput",
+        params:
+          isRecord(event.payload) && "threadId" in event.payload
+            ? event.payload
+            : {
+                threadId: this.threadIdsBySession.get(sessionId) ?? sessionId,
+                turnId: event.turnId,
+                itemId: event.requestId,
+                questions: [
+                  {
+                    id: "value",
+                    header: "Input required",
+                    question: "Input required",
+                    isOther: true,
+                    isSecret: false,
+                    options: null,
+                  },
+                ],
+              },
+      });
+      return;
+    }
+
+    const machine = this.machines.get(sessionId);
+    if (!machine) {
+      return;
+    }
+    const previous = this.eventPipelines.get(sessionId) ?? Promise.resolve();
+    const next = previous.then(async () => {
+      const turn = await machine.handleEvent(event);
+      if (turn) {
+        this.machines.delete(sessionId);
+      }
+    });
+    this.eventPipelines.set(
+      sessionId,
+      next
+        .catch(() => {})
+        .finally(() => {
+          if (this.eventPipelines.get(sessionId) === next) {
+            this.eventPipelines.delete(sessionId);
+          }
+        })
+    );
+  }
+
+  private dispatchEvent(sessionId: string, event: BackendAppServerEvent) {
     for (const listener of this.listeners.get(sessionId) ?? []) {
       listener(event);
     }
@@ -143,6 +364,197 @@ class TestBackend implements IBackend {
 
 function createBackend(onPromptCallback?: ConstructorParameters<typeof TestBackend>[0]): IBackend {
   return new TestBackend(onPromptCallback);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function textFromContent(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (isRecord(value) && value.type === "text" && typeof value.text === "string") {
+    return value.text;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => {
+        if (!isRecord(entry)) {
+          return typeof entry === "string" ? entry : "";
+        }
+        if (entry.type === "text" && typeof entry.text === "string") {
+          return entry.text;
+        }
+        return "";
+      })
+      .join("");
+  }
+  if (isRecord(value) && Array.isArray(value.content)) {
+    return textFromContent(value.content);
+  }
+  return "";
+}
+
+function inferToolCommand(input: unknown): string {
+  if (!isRecord(input)) {
+    return "";
+  }
+  if (typeof input.command === "string") {
+    return input.command;
+  }
+  if (Array.isArray(input.command)) {
+    return input.command.filter((entry): entry is string => typeof entry === "string").join(" ");
+  }
+  return "";
+}
+
+function historyToTurns(history: readonly BackendMessage[], cwd: string) {
+  const turns: Array<{
+    id: string;
+    items: Array<Record<string, unknown>>;
+    status: "completed";
+    error: null;
+  }> = [];
+  let currentTurn: {
+    id: string;
+    items: Array<Record<string, unknown>>;
+    status: "completed";
+    error: null;
+  } | null = null;
+  const pendingToolItems = new Map<string, Record<string, unknown>>();
+
+  const ensureTurn = (fallbackId: string) => {
+    if (currentTurn) {
+      return currentTurn;
+    }
+    currentTurn = {
+      id: fallbackId,
+      items: [],
+      status: "completed",
+      error: null,
+    };
+    turns.push(currentTurn);
+    pendingToolItems.clear();
+    return currentTurn;
+  };
+
+  const finalizeTurn = () => {
+    for (const pending of pendingToolItems.values()) {
+      if (pending.type === "commandExecution" && pending.status === "inProgress") {
+        pending.status = "completed";
+        pending.exitCode = pending.exitCode ?? 0;
+        pending.durationMs = pending.durationMs ?? 0;
+      }
+    }
+    pendingToolItems.clear();
+    currentTurn = null;
+  };
+
+  for (const message of history) {
+    if (message.role === "user") {
+      finalizeTurn();
+      const turn = ensureTurn(message.id);
+      turn.items.push({
+        type: "userMessage",
+        id: `${message.id}_user`,
+        content: [{ type: "text", text: textFromContent(message.content) }],
+      });
+      continue;
+    }
+
+    const turn = ensureTurn(message.id);
+    if (message.role === "assistant") {
+      const blocks = Array.isArray(message.content) ? message.content : [message.content];
+      for (const [index, block] of blocks.entries()) {
+        if (!isRecord(block)) {
+          const text = textFromContent(block);
+          if (text.length > 0) {
+            turn.items.push({
+              type: "agentMessage",
+              id: `${message.id}_agent_${index}`,
+              text,
+              phase: null,
+            });
+          }
+          continue;
+        }
+
+        if (block.type === "thinking" && typeof block.thinking === "string") {
+          turn.items.push({
+            type: "reasoning",
+            id: `${message.id}_reasoning_${index}`,
+            summary: [block.thinking],
+            content: [],
+          });
+          continue;
+        }
+
+        if (block.type === "toolCall") {
+          const toolCallId =
+            typeof block.id === "string" && block.id.length > 0
+              ? block.id
+              : `${message.id}_tool_${index}`;
+          const commandItem: Record<string, unknown> = {
+            type: "commandExecution",
+            id: `${message.id}_tool_${index}`,
+            command: inferToolCommand(block.arguments),
+            cwd,
+            processId: null,
+            status: "inProgress",
+            commandActions: [],
+            aggregatedOutput: null,
+            exitCode: null,
+            durationMs: null,
+          };
+          turn.items.push(commandItem);
+          pendingToolItems.set(toolCallId, commandItem);
+          continue;
+        }
+
+        const text = textFromContent(block);
+        if (text.length > 0) {
+          turn.items.push({
+            type: "agentMessage",
+            id: `${message.id}_agent_${index}`,
+            text,
+            phase: null,
+          });
+        }
+      }
+      continue;
+    }
+
+    if (message.role === "toolResult") {
+      const payload = isRecord(message.content) ? message.content : {};
+      const toolCallId = typeof payload.toolCallId === "string" ? payload.toolCallId : null;
+      const pending = toolCallId ? pendingToolItems.get(toolCallId) : null;
+      const outputText = textFromContent(payload.content);
+      if (pending) {
+        pending.aggregatedOutput = outputText || null;
+        pending.status = payload.isError ? "failed" : "completed";
+        pending.exitCode = payload.isError ? 1 : 0;
+        pending.durationMs = 0;
+        if (toolCallId) {
+          pendingToolItems.delete(toolCallId);
+        }
+      }
+      continue;
+    }
+
+    const text = textFromContent(message.content);
+    if (text.length > 0) {
+      turn.items.push({
+        type: "agentMessage",
+        id: `${message.id}_agent`,
+        text,
+        phase: null,
+      });
+    }
+  }
+
+  finalizeTurn();
+  return turns;
 }
 
 function createFakeJwt(payload: Record<string, unknown>): string {
@@ -404,7 +816,7 @@ describe("AppServerConnection", () => {
       method: "config/value/write",
       params: {
         keyPath: "model",
-        value: "gpt-5.4-mini",
+        value: "pi::gpt-5.4-mini",
         mergeStrategy: "replace",
         expectedVersion: "1",
       },
@@ -427,7 +839,7 @@ describe("AppServerConnection", () => {
       id: 3,
       result: {
         config: {
-          model: "gpt-5.4-mini",
+          model: "pi::gpt-5.4-mini",
         },
         layers: [
           {
@@ -447,7 +859,7 @@ describe("AppServerConnection", () => {
       edits: [
         {
           keyPath: "model",
-          value: "openai-codex/gpt-5.4",
+          value: "pi::openai-codex/gpt-5.4",
           mergeStrategy: "upsert",
         },
         {
@@ -489,7 +901,7 @@ describe("AppServerConnection", () => {
         },
       })) as { id: number; result: ThreadStartResponse };
 
-      expect(started.result.model).toBe("openai-codex/gpt-5.4");
+      expect(started.result.model).toBe("pi::openai-codex/gpt-5.4");
       expect(started.result.reasoningEffort).toBe("medium");
       expect(backend.setModelCalls).toContainEqual({
         sessionId: "session_1",
@@ -536,7 +948,7 @@ describe("AppServerConnection", () => {
           },
         })) as { id: number; result: ThreadResumeResponse };
 
-        expect(resumed.result.model).toBe("openai-codex/gpt-5.4");
+        expect(resumed.result.model).toBe("pi::openai-codex/gpt-5.4");
         expect(resumed.result.reasoningEffort).toBe("medium");
         expect(resumedBackend.setModelCalls).toContainEqual({
           sessionId: "session_1",
@@ -572,7 +984,7 @@ describe("AppServerConnection", () => {
         id: 2,
         method: "thread/start",
         params: {
-          model: "anthropic/claude-opus-4-6",
+          model: "pi::anthropic/claude-opus-4-6",
           cwd: "/tmp",
           approvalPolicy: "on-request",
           sandbox: "workspace-write",
@@ -611,7 +1023,7 @@ describe("AppServerConnection", () => {
           collaborationMode: {
             mode: "default",
             settings: {
-              model: "openai-codex/gpt-5.4",
+              model: "pi::openai-codex/gpt-5.4",
               reasoning_effort: "medium",
             },
           },
@@ -652,12 +1064,12 @@ describe("AppServerConnection", () => {
       result: {
         data: [
           {
-            id: "model_1",
-            model: "gpt-5.4-mini",
+            id: "pi::model_1",
+            model: "pi::gpt-5.4-mini",
             upgrade: null,
             upgradeInfo: null,
             availabilityNux: null,
-            displayName: "GPT-5.4 Mini",
+            displayName: "pi / GPT-5.4 Mini",
             description: "Fast model",
             hidden: false,
             supportedReasoningEfforts: [
@@ -1232,7 +1644,7 @@ describe("AppServerConnection", () => {
           parentThreadId: started.result.thread.id,
           message: "initial task",
           agent_type: "worker",
-          model: "anthropic/claude-opus-4-6",
+          model: "pi::anthropic/claude-opus-4-6",
           reasoning_effort: "medium",
         },
       })) as { result: { agent_id: string } };
@@ -1286,7 +1698,7 @@ describe("AppServerConnection", () => {
         result: {
           thread: {
             id: childThreadId,
-            status: { type: "active", activeFlags: ["turn"] },
+            status: { type: "idle" },
           },
         },
       });
@@ -1302,8 +1714,10 @@ describe("AppServerConnection", () => {
         })
       ).resolves.toMatchObject({
         id: 6,
-        error: {
-          message: expect.stringContaining("not ready"),
+        result: {
+          turn: {
+            status: "inProgress",
+          },
         },
       });
 
@@ -1389,7 +1803,11 @@ describe("AppServerConnection", () => {
         },
       });
 
-      expect(prompts.map((prompt) => prompt.text)).toEqual(["initial task", "after resume"]);
+      expect(prompts.map((prompt) => prompt.text)).toEqual([
+        "initial task",
+        "illegal",
+        "after resume",
+      ]);
       expect(
         notifications.find(
           (notification) =>
@@ -1469,7 +1887,7 @@ describe("AppServerConnection", () => {
           parentThreadId: started.result.thread.id,
           message: "initial task",
           agent_type: "worker",
-          model: "anthropic/claude-opus-4-6",
+          model: "pi::anthropic/claude-opus-4-6",
           reasoning_effort: "medium",
         },
       })) as { result: { agent_id: string } };
@@ -1512,7 +1930,7 @@ describe("AppServerConnection", () => {
       ).resolves.toMatchObject({
         id: 6,
         result: {
-          model: "anthropic/claude-opus-4-6",
+          model: "pi::anthropic/claude-opus-4-6",
           reasoningEffort: "medium",
           thread: {
             id: childThreadId,
@@ -1660,7 +2078,7 @@ describe("AppServerConnection", () => {
         backendType: "pi",
         cwd: "/repo",
         preview: "run pwd",
-        model: "anthropic/claude-opus-4-6",
+        model: "pi::anthropic/claude-opus-4-6",
         modelProvider: "pi",
         reasoningEffort: "medium",
         source: {
@@ -1869,7 +2287,7 @@ describe("AppServerConnection", () => {
         result: {
           thread: {
             id: childThreadId,
-            status: { type: "active", activeFlags: ["turn"] },
+            status: { type: "idle" },
             turns: [
               {
                 items: [
@@ -1877,13 +2295,8 @@ describe("AppServerConnection", () => {
                     type: "userMessage",
                     content: [{ type: "text", text: "initial task" }],
                   },
-                  {
-                    type: "commandExecution",
-                    command: "echo hi",
-                    status: "inProgress",
-                  },
                 ],
-                status: "inProgress",
+                status: "completed",
               },
             ],
           },
@@ -1950,14 +2363,14 @@ describe("AppServerConnection", () => {
       })) as { result: { thread: { id: string } } };
       const threadId = started.result.thread.id;
 
-      const turnStarted = (await connection.handleMessage({
+      await connection.handleMessage({
         id: 3,
         method: "turn/start",
         params: {
           threadId,
           input: [{ type: "text", text: "What is today's date?", text_elements: [] }],
         },
-      })) as { result: { turn: { id: string } } };
+      });
 
       await new Promise((resolve) => setTimeout(resolve, 25));
 
@@ -1977,7 +2390,7 @@ describe("AppServerConnection", () => {
             id: threadId,
             turns: [
               {
-                id: turnStarted.result.turn.id,
+                id: "message-0",
                 status: "completed",
                 items: [
                   {
@@ -2143,6 +2556,7 @@ describe("AppServerConnection", () => {
         });
       });
     });
+    const abortSpy = vi.spyOn(backend, "abort");
     const connection = new AppServerConnection({
       backend,
       collabEnabled: true,
@@ -2218,14 +2632,7 @@ describe("AppServerConnection", () => {
       await new Promise((resolve) => setTimeout(resolve, 25));
 
       expect(prompts).toEqual(["long running task", "replacement task"]);
-      expect(
-        notifications.find(
-          (notification) =>
-            notification.method === "turn/completed" &&
-            notification.params?.threadId === childThreadId &&
-            notification.params.turn?.status === "interrupted"
-        )
-      ).toBeTruthy();
+      expect(abortSpy).toHaveBeenCalledWith("session_2");
     } finally {
       await rm(directory, { recursive: true, force: true });
       await connection.dispose();
@@ -2876,7 +3283,9 @@ describe("AppServerConnection", () => {
         records.some(
           (record) =>
             record.kind === "backend-event" &&
-            record.eventType === "text_delta" &&
+            record.eventType === "notification" &&
+            isRecord(record.payload) &&
+            record.payload.method === "item/agentMessage/delta" &&
             record.accepted === true
         )
       ).toBe(true);
@@ -3014,7 +3423,15 @@ describe("AppServerConnection", () => {
         {
           sessionId: "session_1",
           requestId: "pi-request-1",
-          response: { confirmed: true },
+          response: {
+            result: {
+              answers: {
+                value: {
+                  answers: ["Yes"],
+                },
+              },
+            },
+          },
         },
       ]);
       expect(outgoing.some((message) => message.method === "serverRequest/resolved")).toBe(true);

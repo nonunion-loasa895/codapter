@@ -3,10 +3,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import { validateHeaderValue } from "node:http";
 import { dirname, resolve } from "node:path";
+import { BackendRouter } from "./backend-router.js";
 import type {
-  BackendEvent,
+  BackendAppServerEvent,
   BackendImageInput,
-  BackendMessage,
+  BackendResolveServerRequestInput,
   BackendSessionLaunchConfig,
   Disposable,
   IBackend,
@@ -71,7 +72,6 @@ import type {
   ThreadArchiveResponse,
   ThreadForkParams,
   ThreadForkResponse,
-  ThreadItem,
   ThreadListParams,
   ThreadListResponse,
   ThreadLoadedListParams,
@@ -91,9 +91,6 @@ import type {
   ThreadUnarchiveResponse,
   ThreadUnsubscribeParams,
   ThreadUnsubscribeResponse,
-  ToolRequestUserInputParams,
-  ToolRequestUserInputQuestion,
-  ToolRequestUserInputResponse,
   Turn,
   TurnInterruptParams,
   TurnInterruptResponse,
@@ -106,8 +103,6 @@ import {
   type ThreadRegistryEntry,
   type ThreadRegistryLogger,
 } from "./thread-registry.js";
-import { classifyToolName, synthesizeFileChanges } from "./tool-items.js";
-import { TurnStateMachine, toThreadTokenUsage } from "./turn-state.js";
 
 const JSON_RPC_METHOD_NOT_FOUND = -32601;
 const JSON_RPC_INVALID_PARAMS = -32602;
@@ -118,7 +113,7 @@ const ADAPTER_VERSION = "0.0.1";
 const DEFAULT_APPROVAL_POLICY = "never";
 const DEFAULT_APPROVALS_REVIEWER = "user";
 const DEFAULT_SANDBOX_MODE: SandboxMode = "workspace-write";
-const DEFAULT_MODEL_PROVIDER = "pi";
+const DEFAULT_MODEL_PROVIDER = "unknown";
 const INTERNAL_TITLE_THREAD_PROMPT_PREFIX =
   "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task";
 const INTERNAL_TITLE_THREAD_PROMPT_MARKER = "Generate a concise UI title";
@@ -143,6 +138,7 @@ export type AppServerOutgoingMessage = JsonRpcEnvelope;
 
 export interface AppServerConnectionOptions {
   readonly backend?: IBackend;
+  readonly backendRouter?: BackendRouter;
   readonly collabEnabled?: boolean;
   readonly configStore?: InMemoryConfigStore;
   readonly identity?: AppServerIdentity;
@@ -161,12 +157,11 @@ interface ConnectionState {
 }
 
 interface ThreadRuntime {
-  sessionId: string;
+  backendType: string;
+  threadHandle: string;
   status: "starting" | "ready" | "turn_active" | "forking" | "terminating";
   activeTurnId: string | null;
-  activeTurnInput: JsonValue[] | null;
   latestTurnId: string | null;
-  machine: TurnStateMachine | null;
   subscription: Disposable | null;
   eventQueue: Promise<void>;
   readyResolver: (() => void) | null;
@@ -175,13 +170,11 @@ interface ThreadRuntime {
   statusOverride: ThreadStatus | null;
 }
 
-interface PendingToolUserInputRequest {
+interface PendingBackendServerRequest {
   threadId: string;
-  turnId: string;
-  sessionId: string;
-  backendRequestId: string;
-  resolve(response: ToolRequestUserInputResponse): void;
-  reject(error: unknown): void;
+  backendType: string;
+  threadHandle: string;
+  backendRequestId: string | number;
 }
 
 type StoredAuthState =
@@ -410,16 +403,6 @@ function toUnixSeconds(isoTimestamp: string): number {
   return Math.floor(new Date(isoTimestamp).getTime() / 1000);
 }
 
-function textFromUnknown(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
-  }
-  if (value === null || value === undefined) {
-    return "";
-  }
-  return JSON.stringify(value);
-}
-
 function isInternalTitlePrompt(text: string): boolean {
   const normalized = text.trim();
   return (
@@ -434,309 +417,6 @@ function isInternalTitlePreview(preview: string | null): boolean {
     normalized.startsWith(INTERNAL_TITLE_THREAD_PROMPT_PREFIX) ||
     normalized.startsWith(INTERNAL_TITLE_THREAD_PREVIEW_PREFIX)
   );
-}
-
-function toJsonValueArray(value: unknown): JsonValue[] {
-  if (Array.isArray(value)) {
-    return structuredClone(value) as JsonValue[];
-  }
-  const text = textFromUnknown(value);
-  if (!text) {
-    return [];
-  }
-  return [{ type: "text", text }];
-}
-
-function commandFromToolArguments(input: unknown): string {
-  if (typeof input === "string") {
-    return input;
-  }
-  if (!isRecord(input)) {
-    return "";
-  }
-  const command = input.command;
-  if (typeof command === "string") {
-    return command;
-  }
-  if (Array.isArray(command)) {
-    return command.filter((value): value is string => typeof value === "string").join(" ");
-  }
-  return "";
-}
-
-function toolKindFromName(toolName: string): "commandExecution" | "fileChange" | "agentMessage" {
-  return classifyToolName(toolName);
-}
-
-function thinkingSummaryFromSignature(signature: string): string | null {
-  try {
-    const parsed = JSON.parse(signature);
-    if (!isRecord(parsed) || !Array.isArray(parsed.summary)) {
-      return null;
-    }
-    const summary = parsed.summary
-      .flatMap((entry) => {
-        if (!isRecord(entry) || typeof entry.text !== "string") {
-          return [];
-        }
-        return [entry.text];
-      })
-      .join("")
-      .trim();
-    return summary.length > 0 ? summary : null;
-  } catch {
-    return null;
-  }
-}
-
-function thinkingSummaryFromContent(content: unknown): string | null {
-  if (!isRecord(content)) {
-    return null;
-  }
-  if (typeof content.thinkingSignature === "string") {
-    const summary = thinkingSummaryFromSignature(content.thinkingSignature);
-    if (summary) {
-      return summary;
-    }
-  }
-  if (typeof content.thinking === "string" && content.thinking.trim().length > 0) {
-    return content.thinking;
-  }
-  return null;
-}
-
-function textContentFromBlocks(blocks: readonly JsonValue[]): string {
-  return blocks
-    .map((block) => {
-      if (!isRecord(block)) {
-        return textFromUnknown(block);
-      }
-      if (block.type === "text" && typeof block.text === "string") {
-        return block.text;
-      }
-      return textFromUnknown(block);
-    })
-    .join("");
-}
-
-function finalizeHistoricalToolItem(item: ThreadItem): void {
-  if (item.type === "commandExecution" && item.status === "inProgress") {
-    item.status = "completed";
-    item.exitCode = item.exitCode ?? 0;
-    item.durationMs = item.durationMs ?? 0;
-  }
-  if (item.type === "fileChange" && item.status === "inProgress") {
-    item.status = "completed";
-  }
-}
-
-function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
-  const turns: Turn[] = [];
-  let currentTurn: Turn | null = null;
-  let pendingTools = new Map<string, { item: ThreadItem; toolName: string; input: unknown }>();
-
-  const ensureTurn = (id: string) => {
-    if (currentTurn) {
-      return currentTurn;
-    }
-    currentTurn = {
-      id,
-      items: [],
-      status: "completed",
-      error: null,
-    };
-    turns.push(currentTurn);
-    pendingTools = new Map<string, { item: ThreadItem; toolName: string; input: unknown }>();
-    return currentTurn;
-  };
-
-  const finalizeTurn = () => {
-    for (const pending of pendingTools.values()) {
-      finalizeHistoricalToolItem(pending.item);
-    }
-    currentTurn = null;
-    pendingTools = new Map<string, { item: ThreadItem; toolName: string; input: unknown }>();
-  };
-
-  for (const message of history) {
-    if (message.role === "user") {
-      finalizeTurn();
-      const turn = ensureTurn(message.id);
-      turn.items.push({
-        type: "userMessage",
-        id: `${message.id}_item`,
-        content: toJsonValueArray(message.content),
-      });
-      continue;
-    }
-
-    const turn = ensureTurn(message.id);
-    if (message.role === "assistant") {
-      const content = toJsonValueArray(message.content);
-      for (const [index, block] of content.entries()) {
-        if (!isRecord(block)) {
-          const text = textFromUnknown(block);
-          if (text) {
-            turn.items.push({
-              type: "agentMessage",
-              id: `${message.id}_item_${index}`,
-              text,
-              phase: null,
-            });
-          }
-          continue;
-        }
-
-        if (block.type === "thinking") {
-          const summary = thinkingSummaryFromContent(block);
-          if (summary) {
-            turn.items.push({
-              type: "reasoning",
-              id: `${message.id}_reasoning_${index}`,
-              summary: [summary],
-              content: [],
-            });
-          }
-          continue;
-        }
-
-        if (block.type === "toolCall") {
-          const toolName = typeof block.name === "string" ? block.name : "tool";
-          const toolCallId =
-            typeof block.id === "string" && block.id.length > 0
-              ? block.id
-              : `${message.id}_tool_${index}`;
-          const toolKind = toolKindFromName(toolName);
-          const item: ThreadItem =
-            toolKind === "commandExecution"
-              ? {
-                  type: "commandExecution",
-                  id: `${message.id}_tool_${index}`,
-                  command: commandFromToolArguments(block.arguments),
-                  cwd,
-                  processId: null,
-                  status: "inProgress",
-                  commandActions: [],
-                  aggregatedOutput: null,
-                  exitCode: null,
-                  durationMs: null,
-                }
-              : toolKind === "fileChange"
-                ? {
-                    type: "fileChange",
-                    id: `${message.id}_tool_${index}`,
-                    changes: synthesizeFileChanges(toolName, cwd, block.arguments),
-                    status: "inProgress",
-                  }
-                : {
-                    type: "agentMessage",
-                    id: `${message.id}_tool_${index}`,
-                    text: "",
-                    phase: null,
-                  };
-          turn.items.push(item);
-          pendingTools.set(toolCallId, {
-            item,
-            toolName,
-            input: block.arguments,
-          });
-          continue;
-        }
-
-        const text =
-          block.type === "text" && typeof block.text === "string"
-            ? block.text
-            : textFromUnknown(block);
-        if (text) {
-          turn.items.push({
-            type: "agentMessage",
-            id: `${message.id}_item_${index}`,
-            text,
-            phase: null,
-          });
-        }
-      }
-      continue;
-    }
-
-    if (message.role === "toolResult") {
-      const record = isRecord(message.content) ? message.content : {};
-      const toolCallId =
-        typeof record.toolCallId === "string" ? record.toolCallId : `${message.id}_toolResult`;
-      const toolName = typeof record.toolName === "string" ? record.toolName : "tool";
-      const blocks = toJsonValueArray(record.content);
-      const outputText = textContentFromBlocks(blocks);
-      const isError = Boolean(record.isError);
-      const pending = pendingTools.get(toolCallId);
-      if (pending) {
-        if (pending.item.type === "commandExecution") {
-          pending.item.aggregatedOutput = outputText || pending.item.aggregatedOutput;
-          pending.item.status = isError ? "failed" : "completed";
-          pending.item.exitCode = isError ? 1 : 0;
-          pending.item.durationMs = pending.item.durationMs ?? 0;
-        } else if (pending.item.type === "fileChange") {
-          const changes = synthesizeFileChanges(toolName, cwd, pending.input, record);
-          pending.item.changes = changes.length > 0 ? changes : blocks;
-          pending.item.status = isError ? "failed" : "completed";
-        } else if (pending.item.type === "agentMessage") {
-          pending.item.text = outputText;
-        }
-        pendingTools.delete(toolCallId);
-        continue;
-      }
-
-      const toolKind = toolKindFromName(toolName);
-      if (toolKind === "commandExecution") {
-        turn.items.push({
-          type: "commandExecution",
-          id: `${message.id}_toolResult`,
-          command: "",
-          cwd,
-          processId: null,
-          status: isError ? "failed" : "completed",
-          commandActions: [],
-          aggregatedOutput: outputText || null,
-          exitCode: isError ? 1 : 0,
-          durationMs: 0,
-        });
-        continue;
-      }
-
-      if (toolKind === "fileChange") {
-        const changes = synthesizeFileChanges(toolName, cwd, record, record);
-        turn.items.push({
-          type: "fileChange",
-          id: `${message.id}_toolResult`,
-          changes: changes.length > 0 ? changes : blocks,
-          status: isError ? "failed" : "completed",
-        });
-        continue;
-      }
-
-      if (outputText) {
-        turn.items.push({
-          type: "agentMessage",
-          id: `${message.id}_toolResult`,
-          text: outputText,
-          phase: null,
-        });
-      }
-      continue;
-    }
-
-    const text = textFromUnknown(message.content);
-    if (text) {
-      turn.items.push({
-        type: "agentMessage",
-        id: `${message.id}_item`,
-        text,
-        phase: null,
-      });
-    }
-  }
-
-  finalizeTurn();
-  return turns;
 }
 
 function toUserMessageContent(input: readonly UserInput[]): JsonValue[] {
@@ -754,52 +434,6 @@ function toUserMessageContent(input: readonly UserInput[]): JsonValue[] {
         return { type: "mention", name: item.name, path: item.path };
     }
   });
-}
-
-function buildTurnsWithRuntimeState(turns: Turn[], runtime?: ThreadRuntime): Turn[] {
-  if (!runtime) {
-    return turns;
-  }
-
-  if (!runtime.machine) {
-    if (!runtime.latestTurnId || turns.length === 0) {
-      return turns;
-    }
-
-    const lastTurn = turns.at(-1);
-    if (!lastTurn || lastTurn.id === runtime.latestTurnId) {
-      return turns;
-    }
-
-    return [...turns.slice(0, -1), { ...lastTurn, id: runtime.latestTurnId }];
-  }
-
-  const snapshot = runtime.machine.snapshot;
-  const activeTurnInput = runtime.activeTurnInput;
-  if (
-    activeTurnInput &&
-    !snapshot.items.some((item) => item.type === "userMessage") &&
-    activeTurnInput.length > 0
-  ) {
-    snapshot.items.unshift({
-      type: "userMessage",
-      id: `${snapshot.id}_user`,
-      content: structuredClone(activeTurnInput),
-    });
-  }
-
-  if (activeTurnInput && turns.length > 0) {
-    const lastTurn = turns.at(-1);
-    const lastUserMessage = lastTurn?.items.find((item) => item.type === "userMessage");
-    if (
-      lastUserMessage &&
-      JSON.stringify(lastUserMessage.content) === JSON.stringify(activeTurnInput)
-    ) {
-      return [...turns.slice(0, -1), snapshot];
-    }
-  }
-
-  return [...turns, snapshot];
 }
 
 function runtimeToThreadStatus(runtime: ThreadRuntime | undefined): ThreadStatus {
@@ -851,142 +485,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function toQuestionOptions(options: unknown): ToolRequestUserInputQuestion["options"] {
-  if (!Array.isArray(options)) {
-    return null;
-  }
-
-  return options
-    .filter((value): value is string => typeof value === "string")
-    .map((label) => ({
-      label,
-      description: label,
-    }));
-}
-
-function buildToolRequestUserInput(
-  threadId: string,
-  turnId: string,
-  itemId: string,
-  payload: unknown
-): ToolRequestUserInputParams | null {
-  if (!isRecord(payload) || typeof payload.method !== "string") {
-    return null;
-  }
-
-  const header = typeof payload.title === "string" ? payload.title : "Input required";
-  switch (payload.method) {
-    case "select":
-      return {
-        threadId,
-        turnId,
-        itemId,
-        questions: [
-          {
-            id: "value",
-            header,
-            question: header,
-            isOther: false,
-            isSecret: false,
-            options: toQuestionOptions(payload.options),
-          },
-        ],
-      };
-    case "confirm":
-      return {
-        threadId,
-        turnId,
-        itemId,
-        questions: [
-          {
-            id: "confirmed",
-            header,
-            question: typeof payload.message === "string" ? payload.message : header,
-            isOther: false,
-            isSecret: false,
-            options: [
-              { label: "Yes", description: "Approve this request." },
-              { label: "No", description: "Decline this request." },
-            ],
-          },
-        ],
-      };
-    case "input":
-      return {
-        threadId,
-        turnId,
-        itemId,
-        questions: [
-          {
-            id: "value",
-            header,
-            question: typeof payload.placeholder === "string" ? payload.placeholder : header,
-            isOther: true,
-            isSecret: false,
-            options: null,
-          },
-        ],
-      };
-    case "editor":
-      return {
-        threadId,
-        turnId,
-        itemId,
-        questions: [
-          {
-            id: "value",
-            header,
-            question: header,
-            isOther: true,
-            isSecret: false,
-            options: null,
-          },
-        ],
-      };
-    default:
-      return null;
-  }
-}
-
-function firstAnswer(
-  response: ToolRequestUserInputResponse,
-  questionId: string
-): string | undefined {
-  return response.answers[questionId]?.answers[0];
-}
-
-function mapToolRequestUserInputResponse(
-  payload: unknown,
-  response: ToolRequestUserInputResponse
-): unknown {
-  if (!isRecord(payload) || typeof payload.method !== "string") {
-    return { cancelled: true as const };
-  }
-
-  switch (payload.method) {
-    case "select": {
-      const value = firstAnswer(response, "value");
-      return value ? { value } : { cancelled: true as const };
-    }
-    case "confirm": {
-      const value = firstAnswer(response, "confirmed");
-      if (!value) {
-        return { cancelled: true as const };
-      }
-      return { confirmed: /^y(es)?$/i.test(value) || /^true$/i.test(value) };
-    }
-    case "input":
-    case "editor": {
-      const value = firstAnswer(response, "value");
-      return value !== undefined ? { value } : { cancelled: true as const };
-    }
-    default:
-      return { cancelled: true as const };
-  }
-}
-
 export class AppServerConnection {
-  private readonly backend: IBackend | undefined;
+  private readonly backendRouter: BackendRouter;
   private readonly configStore: InMemoryConfigStore;
   private readonly identity: AppServerIdentity;
   private readonly logger: AppServerLogger;
@@ -1001,9 +501,9 @@ export class AppServerConnection {
   private readonly collabUdsListener: CollabUdsListener | null;
   private readonly collabReady: Promise<void>;
   private readonly threadRuntimes = new Map<string, ThreadRuntime>();
-  private readonly pendingToolUserInputRequests = new Map<
+  private readonly pendingBackendServerRequests = new Map<
     string | number,
-    PendingToolUserInputRequest
+    PendingBackendServerRequest
   >();
   private authState: StoredAuthState | null = {
     mode: "chatgptAuthTokens",
@@ -1021,7 +521,9 @@ export class AppServerConnection {
   };
 
   constructor(options: AppServerConnectionOptions = {}) {
-    this.backend = options.backend;
+    this.backendRouter =
+      options.backendRouter ??
+      (options.backend ? new BackendRouter([options.backend]) : new BackendRouter());
     this.configStore = options.configStore ?? new InMemoryConfigStore();
     this.identity = options.identity ?? createIdentity();
     this.logger = options.logger ?? defaultLogger();
@@ -1034,31 +536,38 @@ export class AppServerConnection {
     this.threadRegistry =
       options.threadRegistry ?? new ThreadRegistry(undefined, this.logger as ThreadRegistryLogger);
     this.onMessage = options.onMessage;
-    this.collabEnabled = Boolean(options.collabEnabled && this.backend);
+    this.collabEnabled = Boolean(options.collabEnabled);
     this.commandExecManager = new CommandExecManager({
       onNotification: async (notification) => {
         await this.publish(notification.method, notification.params);
       },
     });
-    if (this.collabEnabled && this.backend) {
+    if (this.collabEnabled) {
       const notifySink: CollabManagerNotificationSink = {
         notify: async (method, params, threadId) => {
           await this.publish(method, params, threadId);
         },
       };
       this.collabManager = new CollabManager({
-        backend: this.backend,
+        backendRouter: this.backendRouter,
         notifySink,
         resolveParentTurnId: (parentThreadId) =>
           this.threadRuntimes.get(parentThreadId)?.latestTurnId ??
           this.threadRuntimes.get(parentThreadId)?.activeTurnId ??
           "unknown",
-        resolveThreadSessionId: (threadId) => {
+        resolveThreadHandle: (threadId) => {
           const runtime = this.threadRuntimes.get(threadId);
           if (!runtime) {
             throw new Error(`Thread ${threadId} is not loaded`);
           }
-          return runtime.sessionId;
+          return runtime.threadHandle;
+        },
+        resolveThreadBackendType: (threadId) => {
+          const runtime = this.threadRuntimes.get(threadId);
+          if (!runtime) {
+            throw new Error(`Thread ${threadId} is not loaded`);
+          }
+          return runtime.backendType;
         },
         createSessionLaunchConfig: (threadId) => this.createBackendSessionLaunchConfig(threadId),
         createChildThread: async (input) => {
@@ -1067,7 +576,7 @@ export class AppServerConnection {
         startChildTurn: async ({ agent, message }) =>
           await this.startCollabChildTurn(agent, message),
         onChildAgentEvent: async ({ agent, event }) => {
-          this.enqueueBackendEvent(agent.threadId, event.turnId, event);
+          this.enqueueBackendEvent(agent.threadId, event);
         },
         onChildAgentStatusChanged: async ({ agent }) => {
           this.syncCollabRuntimeState(agent);
@@ -1110,10 +619,7 @@ export class AppServerConnection {
       runtime.readyPromise = null;
       runtime.subscription?.dispose();
     }
-    for (const request of this.pendingToolUserInputRequests.values()) {
-      request.reject(new Error("Connection closed before server request resolved"));
-    }
-    this.pendingToolUserInputRequests.clear();
+    this.pendingBackendServerRequests.clear();
     this.threadRuntimes.clear();
     await this.commandExecManager.dispose();
     await this.debugLogWriter?.write({
@@ -1243,18 +749,39 @@ export class AppServerConnection {
       return null;
     }
 
-    const pending = this.pendingToolUserInputRequests.get(message.id);
+    const pending = this.pendingBackendServerRequests.get(message.id);
     if (!pending) {
       return null;
     }
 
-    this.pendingToolUserInputRequests.delete(message.id);
-    if ("error" in message) {
-      pending.reject(message.error);
+    this.pendingBackendServerRequests.delete(message.id);
+    const backend = this.backendRouter.getBackend(pending.backendType);
+    if (!backend) {
       return null;
     }
-
-    pending.resolve(message.result as ToolRequestUserInputResponse);
+    const responsePayload =
+      "error" in message ? { error: message.error } : { result: message.result };
+    const resolveInput: BackendResolveServerRequestInput = {
+      threadId: pending.threadId,
+      threadHandle: pending.threadHandle,
+      requestId: pending.backendRequestId,
+      response: responsePayload,
+    };
+    void backend.resolveServerRequest(resolveInput).catch((error) => {
+      this.logger.warn("Failed to resolve backend server request", {
+        threadId: pending.threadId,
+        backendType: pending.backendType,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    void this.publish(
+      "serverRequest/resolved",
+      {
+        threadId: pending.threadId,
+        requestId: message.id,
+      },
+      pending.threadId
+    );
     return null;
   }
 
@@ -1615,7 +1142,7 @@ export class AppServerConnection {
   }
 
   private async handleModelList(): Promise<ModelListResponse> {
-    const models = this.backend ? await this.backend.listModels() : [];
+    const models = await this.backendRouter.listModels();
 
     const response: ModelListResponse = {
       data: models.map((model) => ({
@@ -1648,12 +1175,9 @@ export class AppServerConnection {
   }
 
   private async handleThreadStart(params: unknown): Promise<ThreadStartResponse> {
-    const backend = this.requireBackend();
     const parsed = params as ThreadStartParams;
     await this.collabReady;
     const threadId = randomUUID();
-    const sessionId = await backend.createSession(this.createBackendSessionLaunchConfig(threadId));
-    const sessionPath = await backend.getSessionPath(sessionId);
     const ephemeral = parsed.ephemeral ?? false;
     const effectiveModel = this.resolveRequestedModel(parsed.cwd ?? null, parsed.model, null, null);
     const effectiveReasoningEffort = this.resolveRequestedReasoningEffort(
@@ -1662,25 +1186,35 @@ export class AppServerConnection {
       null,
       null
     );
-    if (effectiveModel) {
-      await backend.setModel(sessionId, effectiveModel);
-    }
+    const selection = await this.backendRouter.resolveModelSelection(effectiveModel);
+    const backend = selection.backend;
+    const threadStart = await backend.threadStart({
+      threadId,
+      cwd: parsed.cwd ?? process.cwd(),
+      model: selection.selection.rawModelId,
+      reasoningEffort: effectiveReasoningEffort,
+      launchConfig: this.createBackendSessionLaunchConfig(threadId),
+    });
+    const selectedModel =
+      effectiveModel ?? `${selection.selection.backendType}::${selection.selection.rawModelId}`;
+
     const entry = await this.threadRegistry.create({
       threadId,
-      backendSessionId: sessionId,
-      backendType: "pi",
+      backendSessionId: threadStart.threadHandle,
+      backendType: backend.backendType,
       ephemeral,
       hidden: ephemeral,
-      path: ephemeral ? null : sessionPath,
+      path: ephemeral ? null : threadStart.path,
       cwd: parsed.cwd ?? process.cwd(),
       preview: "",
-      model: effectiveModel,
-      modelProvider: parsed.modelProvider ?? DEFAULT_MODEL_PROVIDER,
-      reasoningEffort: effectiveReasoningEffort,
+      model: selectedModel,
+      modelProvider: parsed.modelProvider ?? backend.backendType,
+      reasoningEffort: threadStart.reasoningEffort ?? effectiveReasoningEffort,
       gitInfo: null,
     });
 
-    const runtime = this.initRuntime(entry.threadId, sessionId);
+    const runtime = this.initRuntime(entry.threadId, backend.backendType, threadStart.threadHandle);
+    this.bindRuntimeSubscription(entry.threadId, runtime);
     this.transitionToReady(entry.threadId, runtime);
 
     const thread = this.buildThread(entry, []);
@@ -1690,19 +1224,19 @@ export class AppServerConnection {
       thread,
       entry.model,
       entry.reasoningEffort,
-      effectiveModel,
+      selectedModel,
       parsed.cwd ?? null,
       parsed.approvalPolicy ?? null,
       parsed.approvalsReviewer ?? null,
       parsed.sandbox ?? null,
-      effectiveReasoningEffort
+      threadStart.reasoningEffort ?? effectiveReasoningEffort
     );
   }
 
   private async handleThreadResume(params: unknown): Promise<ThreadResumeResponse> {
-    const backend = this.requireBackend();
     const parsed = params as ThreadResumeParams;
     let entry = await this.getThreadEntry(parsed.threadId);
+    const backend = this.requireBackend(entry.backendType);
     const effectiveModel = this.resolveRequestedModel(
       parsed.cwd ?? entry.cwd,
       parsed.model,
@@ -1721,87 +1255,71 @@ export class AppServerConnection {
     const needsCollabResume =
       collabAgent?.status === "shutdown" || collabAgent?.status === "errored";
     const existing = this.threadRuntimes.get(parsed.threadId);
-    if (existing && !needsCollabResume) {
-      if (existing.status === "starting" && existing.readyPromise) {
-        await existing.readyPromise;
-      }
-      if (effectiveModel) {
-        await backend.setModel(existing.sessionId, effectiveModel);
-      }
-      const sessionPath = await backend.getSessionPath(existing.sessionId);
-      const resolvedPath = entry.ephemeral ? null : sessionPath;
-      if (
-        entry.path !== resolvedPath ||
-        entry.model !== effectiveModel ||
-        entry.reasoningEffort !== effectiveReasoningEffort
-      ) {
-        entry = await this.threadRegistry.update(parsed.threadId, {
-          path: resolvedPath,
-          model: effectiveModel,
-          reasoningEffort: effectiveReasoningEffort,
-        });
-      }
-      const history = await backend.readSessionHistory(existing.sessionId);
-      const turns = buildTurnsWithRuntimeState(
-        buildTurns(history, entry.cwd ?? process.cwd()),
-        existing
-      );
-      const thread = this.buildThread(entry, turns);
-      return await this.buildThreadExecutionResponse(
-        thread,
-        entry.model,
-        entry.reasoningEffort,
-        effectiveModel,
-        parsed.cwd ?? null,
-        parsed.approvalPolicy ?? null,
-        parsed.approvalsReviewer ?? null,
-        parsed.sandbox ?? null,
-        effectiveReasoningEffort
-      );
-    }
-
     const runtime = existing
       ? this.prepareRuntimeForResume(parsed.threadId, existing)
       : this.createRuntime(
           parsed.threadId,
+          entry.backendType,
           entry.backendSessionId,
           isSubAgentThreadSource(entry.source)
         );
 
     try {
       await this.collabReady;
-      const sessionId = await backend.resumeSession(
-        entry.backendSessionId,
-        this.createBackendSessionLaunchConfig(parsed.threadId)
-      );
-      if (effectiveModel) {
-        await backend.setModel(sessionId, effectiveModel);
+      const requestedSelection =
+        effectiveModel !== null ? this.backendRouter.parseModelSelection(effectiveModel) : null;
+      if (requestedSelection && requestedSelection.selection.backendType !== entry.backendType) {
+        throw new Error(
+          `Cannot resume thread ${entry.threadId} on backend ${requestedSelection.selection.backendType}; thread belongs to ${entry.backendType}`
+        );
       }
-      const sessionPath = await backend.getSessionPath(sessionId);
-      runtime.sessionId = sessionId;
+      const resumed = await backend.threadResume({
+        threadId: parsed.threadId,
+        threadHandle: entry.backendSessionId,
+        cwd: parsed.cwd ?? entry.cwd ?? process.cwd(),
+        model: requestedSelection?.selection.rawModelId ?? null,
+        reasoningEffort: effectiveReasoningEffort,
+        launchConfig: this.createBackendSessionLaunchConfig(parsed.threadId),
+      });
+      runtime.backendType = entry.backendType;
+      runtime.threadHandle = resumed.threadHandle;
+      this.bindRuntimeSubscription(parsed.threadId, runtime);
       if (isSubAgentThreadSource(entry.source)) {
-        this.collabManager?.syncExternalResume(parsed.threadId, sessionId);
+        this.collabManager?.syncExternalResume(
+          parsed.threadId,
+          resumed.threadHandle,
+          entry.backendType
+        );
       }
       if (
-        entry.backendSessionId !== sessionId ||
-        entry.path !== sessionPath ||
+        entry.backendSessionId !== resumed.threadHandle ||
+        entry.path !== resumed.path ||
         entry.model !== effectiveModel ||
         entry.reasoningEffort !== effectiveReasoningEffort
       ) {
         entry = await this.threadRegistry.update(parsed.threadId, {
-          backendSessionId: sessionId,
-          path: entry.ephemeral ? null : sessionPath,
+          backendSessionId: resumed.threadHandle,
+          path: entry.ephemeral ? null : resumed.path,
           model: effectiveModel,
           reasoningEffort: effectiveReasoningEffort,
         });
       }
 
-      const history = await backend.readSessionHistory(sessionId);
+      const readResult = await backend.threadRead({
+        threadId: parsed.threadId,
+        threadHandle: runtime.threadHandle,
+        includeTurns: true,
+        cwd: entry.cwd ?? process.cwd(),
+      });
+      if (readResult.threadHandle !== runtime.threadHandle) {
+        runtime.threadHandle = readResult.threadHandle;
+        entry = await this.threadRegistry.update(parsed.threadId, {
+          backendSessionId: readResult.threadHandle,
+        });
+        this.bindRuntimeSubscription(parsed.threadId, runtime);
+      }
       this.transitionToReady(parsed.threadId, runtime);
-      const thread = this.buildThread(
-        entry,
-        buildTurnsWithRuntimeState(buildTurns(history, entry.cwd ?? process.cwd()), runtime)
-      );
+      const thread = this.buildThread(entry, [...readResult.turns]);
       await this.publishThreadStatus(parsed.threadId);
       return await this.buildThreadExecutionResponse(
         thread,
@@ -1812,7 +1330,7 @@ export class AppServerConnection {
         parsed.approvalPolicy ?? null,
         parsed.approvalsReviewer ?? null,
         parsed.sandbox ?? null,
-        effectiveReasoningEffort
+        readResult.model ? effectiveReasoningEffort : effectiveReasoningEffort
       );
     } catch (error) {
       runtime.status = "terminating";
@@ -1823,9 +1341,9 @@ export class AppServerConnection {
   }
 
   private async handleThreadFork(params: unknown): Promise<ThreadForkResponse> {
-    const backend = this.requireBackend();
     const parsed = params as ThreadForkParams;
     const sourceEntry = await this.getThreadEntry(parsed.threadId);
+    const backend = this.requireBackend(sourceEntry.backendType);
     const sourceRuntime = this.threadRuntimes.get(parsed.threadId);
     if (sourceRuntime && sourceRuntime.status !== "ready") {
       throw new Error(`Cannot fork thread ${parsed.threadId} (status: ${sourceRuntime.status})`);
@@ -1852,36 +1370,57 @@ export class AppServerConnection {
         null,
         sourceEntry.reasoningEffort
       );
-      const sessionId = await backend.forkSession(
-        sourceEntry.backendSessionId,
-        this.createBackendSessionLaunchConfig(forkThreadId)
-      );
-      const sessionPath = await backend.getSessionPath(sessionId);
-      const ephemeral = parsed.ephemeral ?? false;
-      if (effectiveModel) {
-        await backend.setModel(sessionId, effectiveModel);
+      const requestedSelection =
+        effectiveModel !== null ? this.backendRouter.parseModelSelection(effectiveModel) : null;
+      if (
+        requestedSelection &&
+        requestedSelection.selection.backendType !== sourceEntry.backendType
+      ) {
+        throw new Error(
+          `Cannot fork thread ${parsed.threadId} across backends (${sourceEntry.backendType} -> ${requestedSelection.selection.backendType})`
+        );
       }
+      const forked = await backend.threadFork({
+        threadId: forkThreadId,
+        sourceThreadId: parsed.threadId,
+        sourceThreadHandle: sourceEntry.backendSessionId,
+        cwd: parsed.cwd ?? sourceEntry.cwd ?? process.cwd(),
+        model: requestedSelection?.selection.rawModelId ?? null,
+        reasoningEffort: effectiveReasoningEffort,
+        launchConfig: this.createBackendSessionLaunchConfig(forkThreadId),
+      });
+      const ephemeral = parsed.ephemeral ?? false;
       const entry = await this.threadRegistry.create({
         threadId: forkThreadId,
-        backendSessionId: sessionId,
+        backendSessionId: forked.threadHandle,
         backendType: sourceEntry.backendType,
         ephemeral,
         hidden: ephemeral,
-        path: ephemeral ? null : sessionPath,
+        path: ephemeral ? null : forked.path,
         cwd: parsed.cwd ?? sourceEntry.cwd,
         preview: sourceEntry.preview,
         model: effectiveModel,
-        modelProvider: parsed.modelProvider ?? sourceEntry.modelProvider,
-        reasoningEffort: effectiveReasoningEffort,
+        modelProvider: parsed.modelProvider ?? sourceEntry.backendType,
+        reasoningEffort: forked.reasoningEffort ?? effectiveReasoningEffort,
         name: sourceEntry.name,
         gitInfo: sourceEntry.gitInfo,
       });
 
-      const forkRuntime = this.initRuntime(entry.threadId, sessionId);
+      const forkRuntime = this.initRuntime(
+        entry.threadId,
+        sourceEntry.backendType,
+        forked.threadHandle
+      );
+      this.bindRuntimeSubscription(entry.threadId, forkRuntime);
       this.transitionToReady(entry.threadId, forkRuntime);
 
-      const history = await backend.readSessionHistory(sessionId);
-      const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
+      const readResult = await backend.threadRead({
+        threadId: entry.threadId,
+        threadHandle: forkRuntime.threadHandle,
+        includeTurns: true,
+        cwd: entry.cwd ?? process.cwd(),
+      });
+      const thread = this.buildThread(entry, [...readResult.turns]);
       await this.publish("thread/started", { thread }, entry.threadId);
       await this.publishThreadStatus(entry.threadId);
       return await this.buildThreadExecutionResponse(
@@ -1893,7 +1432,7 @@ export class AppServerConnection {
         parsed.approvalPolicy ?? null,
         parsed.approvalsReviewer ?? null,
         parsed.sandbox ?? null,
-        effectiveReasoningEffort
+        forked.reasoningEffort ?? effectiveReasoningEffort
       );
     } catch (error) {
       if (forkThreadId) {
@@ -1910,18 +1449,25 @@ export class AppServerConnection {
 
   private async handleThreadRead(params: unknown): Promise<ThreadReadResponse> {
     const parsed = params as ThreadReadParams;
-    const entry = await this.getThreadEntry(parsed.threadId);
-    const runtime = this.threadRuntimes.get(parsed.threadId);
-    const turns =
-      parsed.includeTurns && this.backend
-        ? buildTurnsWithRuntimeState(
-            buildTurns(
-              await this.backend.readSessionHistory(entry.backendSessionId),
-              entry.cwd ?? process.cwd()
-            ),
-            runtime
-          )
-        : [];
+    let entry = await this.getThreadEntry(parsed.threadId);
+    const backend = this.requireBackend(entry.backendType);
+    const readResult = await backend.threadRead({
+      threadId: parsed.threadId,
+      threadHandle: entry.backendSessionId,
+      includeTurns: parsed.includeTurns,
+      cwd: entry.cwd ?? process.cwd(),
+    });
+    if (readResult.threadHandle !== entry.backendSessionId) {
+      entry = await this.threadRegistry.update(parsed.threadId, {
+        backendSessionId: readResult.threadHandle,
+      });
+      const runtime = this.threadRuntimes.get(parsed.threadId);
+      if (runtime) {
+        runtime.threadHandle = readResult.threadHandle;
+        this.bindRuntimeSubscription(parsed.threadId, runtime);
+      }
+    }
+    const turns = parsed.includeTurns ? [...readResult.turns] : [];
     return { thread: this.buildThread(entry, turns) };
   }
 
@@ -1995,10 +1541,14 @@ export class AppServerConnection {
   }
 
   private async handleThreadSetName(params: unknown): Promise<ThreadSetNameResponse> {
-    const backend = this.requireBackend();
     const parsed = params as ThreadSetNameParams;
     const entry = await this.getThreadEntry(parsed.threadId);
-    await backend.setSessionName(entry.backendSessionId, parsed.name);
+    const backend = this.requireBackend(entry.backendType);
+    await backend.threadSetName({
+      threadId: parsed.threadId,
+      threadHandle: entry.backendSessionId,
+      name: parsed.name,
+    });
     await this.threadRegistry.update(parsed.threadId, { name: parsed.name });
     await this.publish(
       "thread/name/updated",
@@ -2009,9 +1559,9 @@ export class AppServerConnection {
   }
 
   private async handleThreadArchive(params: unknown): Promise<ThreadArchiveResponse> {
-    const backend = this.requireBackend();
     const parsed = params as ThreadArchiveParams;
     const entry = await this.getThreadEntry(parsed.threadId);
+    const backend = this.requireBackend(entry.backendType);
     if (this.collabManager) {
       const collabAgent = this.collabManager.getAgentByThreadId(parsed.threadId);
       if (collabAgent) {
@@ -2033,7 +1583,10 @@ export class AppServerConnection {
       this.logTransition(parsed.threadId, from, "terminating");
     }
     runtime?.subscription?.dispose();
-    await backend.disposeSession(entry.backendSessionId);
+    await backend.threadArchive({
+      threadId: parsed.threadId,
+      threadHandle: entry.backendSessionId,
+    });
     this.threadRuntimes.delete(parsed.threadId);
     await this.threadRegistry.update(parsed.threadId, { archived: true });
     await this.publish("thread/archived", { threadId: parsed.threadId }, parsed.threadId);
@@ -2069,11 +1622,11 @@ export class AppServerConnection {
   }
 
   private async handleTurnStart(params: unknown): Promise<TurnStartResponse> {
-    const backend = this.requireBackend();
     const parsed = params as TurnStartParams;
     const runtime = await this.getReadyThreadRuntime(parsed.threadId);
     let entry = await this.getThreadEntry(parsed.threadId);
-    const { text, images, preview } = this.normalizeUserInputs(parsed.input);
+    const { text, preview } = this.normalizeUserInputs(parsed.input);
+    const backend = this.requireBackend(entry.backendType);
     const effectiveModel = this.resolveRequestedModel(
       parsed.cwd ?? entry.cwd,
       parsed.model,
@@ -2086,8 +1639,12 @@ export class AppServerConnection {
       parsed.collaborationMode ?? null,
       entry.reasoningEffort
     );
-    if (effectiveModel) {
-      await backend.setModel(runtime.sessionId, effectiveModel);
+    const requestedSelection =
+      effectiveModel !== null ? this.backendRouter.parseModelSelection(effectiveModel) : null;
+    if (requestedSelection && requestedSelection.selection.backendType !== entry.backendType) {
+      throw new Error(
+        `Cannot run turn on backend ${requestedSelection.selection.backendType}; thread belongs to ${entry.backendType}`
+      );
     }
     const threadPatch: {
       hidden?: boolean;
@@ -2118,19 +1675,9 @@ export class AppServerConnection {
     }
 
     const turnId = randomUUID();
-    const cwd = parsed.cwd ?? entry.cwd ?? process.cwd();
-    const activeTurnInput = toUserMessageContent(parsed.input);
-    const machine = new TurnStateMachine(parsed.threadId, turnId, cwd, {
-      notify: async (method, payload) => {
-        await this.publish(method, payload, parsed.threadId);
-      },
-    });
-
     runtime.status = "turn_active";
     runtime.activeTurnId = turnId;
-    runtime.activeTurnInput = activeTurnInput;
     runtime.latestTurnId = turnId;
-    runtime.machine = machine;
     runtime.subscription?.dispose();
     const collabAgent = isSubAgentThreadSource(entry.source)
       ? (this.collabManager?.getAgentByThreadId(parsed.threadId) ?? null)
@@ -2139,47 +1686,60 @@ export class AppServerConnection {
       runtime.subscription = null;
       this.collabManager?.syncExternalTurnStart(parsed.threadId, turnId);
     } else {
-      runtime.subscription = backend.onEvent(runtime.sessionId, (event) => {
-        this.enqueueBackendEvent(parsed.threadId, turnId, event);
-      });
+      this.bindRuntimeSubscription(parsed.threadId, runtime);
     }
 
     await this.publishThreadStatus(parsed.threadId);
-    await machine.emitStarted();
 
     try {
-      await backend.prompt(runtime.sessionId, turnId, text, images);
-    } catch (error) {
-      const turn = await machine.handleEvent({
-        type: "error",
-        sessionId: runtime.sessionId,
+      await backend.turnStart({
+        threadId: parsed.threadId,
+        threadHandle: runtime.threadHandle,
         turnId,
-        message: error instanceof Error ? error.message : String(error),
+        cwd: parsed.cwd ?? entry.cwd ?? process.cwd(),
+        input: parsed.input,
+        model: requestedSelection?.selection.rawModelId ?? null,
+        reasoningEffort: effectiveReasoningEffort,
       });
-      if (turn) {
-        await this.finishTurn(parsed.threadId, turnId);
-      }
+    } catch (error) {
+      await this.finishTurn(parsed.threadId, turnId);
       throw error;
     }
 
+    const turnInput = toUserMessageContent(parsed.input);
     return {
-      turn: machine.snapshot,
+      turn: {
+        id: turnId,
+        status: "inProgress",
+        error: null,
+        items:
+          turnInput.length > 0
+            ? [
+                {
+                  type: "userMessage",
+                  id: `${turnId}_user`,
+                  content: turnInput,
+                },
+              ]
+            : [],
+      },
     };
   }
 
   private async handleTurnInterrupt(params: unknown): Promise<TurnInterruptResponse> {
-    const backend = this.requireBackend();
     const parsed = params as TurnInterruptParams;
     const entry = await this.getThreadEntry(parsed.threadId);
+    const backend = this.requireBackend(entry.backendType);
     const runtime = this.threadRuntimes.get(parsed.threadId);
     if (!runtime || runtime.status !== "turn_active" || runtime.activeTurnId !== parsed.turnId) {
       throw new Error(`No active turn ${parsed.turnId} for thread ${parsed.threadId}`);
     }
 
-    await backend.abort(runtime.sessionId);
-    if (runtime.machine) {
-      await runtime.machine.interrupt();
-    }
+    await backend.turnInterrupt({
+      threadId: parsed.threadId,
+      threadHandle: runtime.threadHandle,
+      turnId: parsed.turnId,
+    });
     await this.finishTurn(parsed.threadId, parsed.turnId);
     if (
       isSubAgentThreadSource(entry.source) &&
@@ -2209,142 +1769,100 @@ export class AppServerConnection {
     return {};
   }
 
-  private async handleBackendEvent(
-    threadId: string,
-    turnId: string,
-    event: BackendEvent
-  ): Promise<void> {
+  private async handleBackendEvent(threadId: string, event: BackendAppServerEvent): Promise<void> {
     const runtime = this.threadRuntimes.get(threadId);
-    const machine = runtime?.machine;
-    const acceptsTurnStream =
-      runtime !== undefined &&
-      machine !== null &&
-      runtime.activeTurnId === turnId &&
-      event.turnId === turnId;
-    const acceptsLateTokenUsage =
-      runtime !== undefined &&
-      event.type === "token_usage" &&
-      runtime.latestTurnId === turnId &&
-      event.turnId === turnId;
-    const accepted = acceptsTurnStream || acceptsLateTokenUsage;
-
+    const turnId =
+      "params" in event && isRecord(event.params) && typeof event.params.turnId === "string"
+        ? event.params.turnId
+        : null;
     await this.debugLogWriter?.write({
       at: new Date().toISOString(),
       component: "app-server",
       kind: "backend-event",
       threadId,
-      turnId,
-      accepted,
-      eventType: event.type,
+      ...(turnId ? { turnId } : {}),
+      accepted: true,
+      eventType: event.kind,
       payload: event,
     });
 
-    if (!accepted) {
-      return;
-    }
-
-    if (event.type === "token_usage") {
-      await this.publish(
-        "thread/tokenUsage/updated",
-        {
+    switch (event.kind) {
+      case "notification":
+        await this.publish(event.method, event.params, threadId);
+        if (event.method === "turn/started" && turnId && runtime) {
+          runtime.status = "turn_active";
+          runtime.activeTurnId = turnId;
+          runtime.latestTurnId = turnId;
+          await this.publishThreadStatus(threadId);
+        }
+        if (event.method === "turn/completed" && turnId) {
+          await this.finishTurn(threadId, turnId);
+        }
+        return;
+      case "serverRequest": {
+        const requestId = randomUUID();
+        this.pendingBackendServerRequests.set(requestId, {
           threadId,
-          turnId,
-          tokenUsage: toThreadTokenUsage(event.usage),
-        },
-        threadId
-      );
-      return;
-    }
-
-    if (!machine) {
-      return;
-    }
-
-    if (event.type === "elicitation_request") {
-      await this.handleToolUserInputRequest(
-        threadId,
-        turnId,
-        runtime.sessionId,
-        event.requestId,
-        event.payload
-      );
-      return;
-    }
-
-    const completedTurn = await machine.handleEvent(event);
-    if (completedTurn) {
-      await this.finishTurn(threadId, turnId);
+          backendType: runtime?.backendType ?? "unknown",
+          threadHandle: runtime?.threadHandle ?? event.threadHandle,
+          backendRequestId: event.requestId,
+        });
+        await this.send({
+          id: requestId,
+          method: event.method,
+          params: event.params,
+        }).catch(() => {
+          this.pendingBackendServerRequests.delete(requestId);
+        });
+        return;
+      }
+      case "error":
+        await this.publish(
+          "backend/error",
+          {
+            threadId,
+            backendType: runtime?.backendType ?? "unknown",
+            code: event.code,
+            message: event.message,
+            retryable: event.retryable,
+          },
+          threadId
+        );
+        return;
+      case "disconnect":
+        await this.publish(
+          "backend/disconnect",
+          {
+            threadId,
+            backendType: runtime?.backendType ?? "unknown",
+            message: event.message,
+          },
+          threadId
+        );
+        if (runtime?.activeTurnId) {
+          await this.finishTurn(threadId, runtime.activeTurnId);
+        }
+        return;
     }
   }
 
-  private enqueueBackendEvent(threadId: string, turnId: string, event: BackendEvent): void {
+  private enqueueBackendEvent(threadId: string, event: BackendAppServerEvent): void {
     const runtime = this.threadRuntimes.get(threadId);
     if (!runtime) {
       return;
     }
 
     const run = async () => {
-      await this.handleBackendEvent(threadId, turnId, event);
+      await this.handleBackendEvent(threadId, event);
     };
 
     runtime.eventQueue = runtime.eventQueue.then(run, run).catch((error) => {
       this.logger.warn("Failed to handle backend event", {
         threadId,
-        turnId,
-        eventType: event.type,
+        eventKind: event.kind,
         error: error instanceof Error ? error.message : String(error),
       });
     });
-  }
-
-  private async handleToolUserInputRequest(
-    threadId: string,
-    turnId: string,
-    sessionId: string,
-    backendRequestId: string,
-    payload: unknown
-  ): Promise<void> {
-    const runtime = this.threadRuntimes.get(threadId);
-    const itemId = runtime?.machine?.snapshot.items.at(-1)?.id ?? backendRequestId;
-    const params = buildToolRequestUserInput(threadId, turnId, itemId, payload);
-    if (!params) {
-      return;
-    }
-
-    const requestId = randomUUID();
-    const response = await new Promise<ToolRequestUserInputResponse>((resolve, reject) => {
-      this.pendingToolUserInputRequests.set(requestId, {
-        threadId,
-        turnId,
-        sessionId,
-        backendRequestId,
-        resolve,
-        reject,
-      });
-
-      void this.send({
-        id: requestId,
-        method: "item/tool/requestUserInput",
-        params,
-      }).catch((error) => {
-        this.pendingToolUserInputRequests.delete(requestId);
-        reject(error);
-      });
-    }).catch(() => ({ answers: {} }));
-
-    await this.requireBackend().respondToElicitation(
-      sessionId,
-      backendRequestId,
-      mapToolRequestUserInputResponse(payload, response)
-    );
-    await this.publish(
-      "serverRequest/resolved",
-      {
-        threadId,
-        requestId,
-      },
-      threadId
-    );
   }
 
   private async finishTurn(threadId: string, turnId: string): Promise<void> {
@@ -2352,9 +1870,7 @@ export class AppServerConnection {
     if (!runtime || runtime.activeTurnId !== turnId) {
       return;
     }
-    runtime.machine = null;
     runtime.activeTurnId = null;
-    runtime.activeTurnInput = null;
     runtime.status = "ready";
     runtime.statusOverride = null;
     await this.publishThreadStatus(threadId);
@@ -2362,7 +1878,8 @@ export class AppServerConnection {
 
   private syncCollabRuntimeState(agent: {
     threadId: string;
-    sessionId: string;
+    threadHandle: string;
+    backendType: string;
     status: string;
   }): void {
     const runtime = this.threadRuntimes.get(agent.threadId);
@@ -2370,35 +1887,28 @@ export class AppServerConnection {
       return;
     }
 
-    runtime.sessionId = agent.sessionId;
+    runtime.backendType = agent.backendType;
+    runtime.threadHandle = agent.threadHandle;
 
-    // Let the queued child message_end finish the live turn before tearing the machine down.
-    if (
-      (agent.status === "completed" && (!runtime.machine || !runtime.activeTurnId)) ||
-      agent.status === "errored" ||
-      agent.status === "shutdown"
-    ) {
-      runtime.machine = null;
+    if (agent.status === "completed" || agent.status === "errored" || agent.status === "shutdown") {
       runtime.activeTurnId = null;
-      runtime.activeTurnInput = null;
       runtime.status = "ready";
       runtime.statusOverride = null;
     }
     if (agent.status === "errored" || agent.status === "shutdown") {
-      this.rejectPendingToolUserInputRequests(
+      this.rejectPendingBackendServerRequests(
         agent.threadId,
         `Collab agent thread ${agent.threadId} closed before server request resolved`
       );
     }
   }
 
-  private rejectPendingToolUserInputRequests(threadId: string, message: string): void {
-    for (const [requestId, request] of this.pendingToolUserInputRequests) {
+  private rejectPendingBackendServerRequests(threadId: string, _message: string): void {
+    for (const [requestId, request] of this.pendingBackendServerRequests) {
       if (request.threadId !== threadId) {
         continue;
       }
-      this.pendingToolUserInputRequests.delete(requestId);
-      request.reject(new Error(message));
+      this.pendingBackendServerRequests.delete(requestId);
     }
   }
 
@@ -2457,7 +1967,7 @@ export class AppServerConnection {
       id: entry.threadId,
       preview: entry.preview ?? "",
       ephemeral: entry.ephemeral,
-      modelProvider: entry.modelProvider ?? DEFAULT_MODEL_PROVIDER,
+      modelProvider: entry.modelProvider ?? entry.backendType ?? DEFAULT_MODEL_PROVIDER,
       createdAt: toUnixSeconds(entry.createdAt),
       updatedAt: toUnixSeconds(entry.updatedAt),
       status: runtimeToThreadStatus(this.threadRuntimes.get(entry.threadId)),
@@ -2484,13 +1994,13 @@ export class AppServerConnection {
     requestedSandboxMode: SandboxMode | null,
     requestedReasoningEffort: string | null
   ): Promise<ThreadStartResponse> {
-    const models = this.backend ? await this.backend.listModels() : [];
+    const models = await this.backendRouter.listModels();
     const defaultModel = models.find((model) => model.isDefault) ?? models[0];
     const cwd = requestedCwd ?? thread.cwd;
 
     return {
       thread,
-      model: requestedModel ?? persistedModel ?? defaultModel?.model ?? "pi-default",
+      model: requestedModel ?? persistedModel ?? defaultModel?.model ?? "unknown::default",
       modelProvider: thread.modelProvider,
       serviceTier: null,
       cwd,
@@ -2530,16 +2040,14 @@ export class AppServerConnection {
     return runtime;
   }
 
-  private initRuntime(threadId: string, sessionId: string): ThreadRuntime {
-    return this.createRuntime(threadId, sessionId, false);
+  private initRuntime(threadId: string, backendType: string, threadHandle: string): ThreadRuntime {
+    return this.createRuntime(threadId, backendType, threadHandle, false);
   }
 
   private prepareRuntimeForResume(threadId: string, runtime: ThreadRuntime): ThreadRuntime {
     const from = runtime.status;
     runtime.status = "starting";
     runtime.activeTurnId = null;
-    runtime.activeTurnInput = null;
-    runtime.machine = null;
     runtime.subscription?.dispose();
     runtime.subscription = null;
     runtime.statusOverride = null;
@@ -2552,7 +2060,8 @@ export class AppServerConnection {
 
   private createRuntime(
     threadId: string,
-    sessionId: string,
+    backendType: string,
+    threadHandle: string,
     managedByCollab: boolean
   ): ThreadRuntime {
     let readyResolver: (() => void) | null = null;
@@ -2560,12 +2069,11 @@ export class AppServerConnection {
       readyResolver = resolve;
     });
     const runtime: ThreadRuntime = {
-      sessionId,
+      backendType,
+      threadHandle,
       status: "starting",
       activeTurnId: null,
-      activeTurnInput: null,
       latestTurnId: null,
-      machine: null,
       subscription: null,
       eventQueue: Promise.resolve(),
       readyResolver,
@@ -2576,6 +2084,14 @@ export class AppServerConnection {
     this.threadRuntimes.set(threadId, runtime);
     this.logTransition(threadId, "none", "starting");
     return runtime;
+  }
+
+  private bindRuntimeSubscription(threadId: string, runtime: ThreadRuntime): void {
+    runtime.subscription?.dispose();
+    const backend = this.requireBackend(runtime.backendType);
+    runtime.subscription = backend.onEvent(runtime.threadHandle, (event) => {
+      this.enqueueBackendEvent(threadId, event);
+    });
   }
 
   private transitionToReady(threadId: string, runtime: ThreadRuntime): void {
@@ -2606,11 +2122,8 @@ export class AppServerConnection {
     return entry;
   }
 
-  private requireBackend(): IBackend {
-    if (!this.backend) {
-      throw new Error("No backend configured");
-    }
-    return this.backend;
+  private requireBackend(backendType: string): IBackend {
+    return this.backendRouter.requireBackend(backendType);
   }
 
   get collabSocketPath(): string | null {
@@ -2630,16 +2143,15 @@ export class AppServerConnection {
 
   private async createCollabChildThread(input: CollabManagerCreateChildThreadInput): Promise<void> {
     const parentEntry = await this.getThreadEntry(input.parentThreadId);
-    const path = this.backend ? await this.backend.getSessionPath(input.sessionId) : null;
     const entry = await this.threadRegistry.create({
       threadId: input.threadId,
-      backendSessionId: input.sessionId,
-      backendType: "pi",
-      path,
+      backendSessionId: input.threadHandle,
+      backendType: input.backendType,
+      path: input.path,
       cwd: parentEntry.cwd ?? process.cwd(),
       preview: input.preview,
       model: input.model,
-      modelProvider: parentEntry.modelProvider ?? DEFAULT_MODEL_PROVIDER,
+      modelProvider: input.backendType,
       reasoningEffort: input.reasoningEffort,
       name: null,
       source: {
@@ -2656,7 +2168,8 @@ export class AppServerConnection {
       agentRole: input.role,
       gitInfo: null,
     });
-    const runtime = this.createRuntime(entry.threadId, input.sessionId, true);
+    const runtime = this.createRuntime(entry.threadId, input.backendType, input.threadHandle, true);
+    this.bindRuntimeSubscription(entry.threadId, runtime);
     this.transitionToReady(entry.threadId, runtime);
 
     const thread = this.buildThread(entry, []);
@@ -2673,32 +2186,27 @@ export class AppServerConnection {
       throw new Error(`Thread ${agent.threadId} is not loaded`);
     }
 
-    const entry = await this.getThreadEntry(agent.threadId);
-    if (runtime.machine && runtime.activeTurnId) {
-      const interruptedTurnId = runtime.activeTurnId;
-      await runtime.machine.interrupt();
-      await this.finishTurn(agent.threadId, interruptedTurnId);
-    }
     const turnId = randomUUID();
-    const cwd = entry.cwd ?? process.cwd();
-    const activeTurnInput = toUserMessageContent([
-      { type: "text", text: message, text_elements: [] },
-    ]);
-    const machine = new TurnStateMachine(agent.threadId, turnId, cwd, {
-      notify: async (method, payload) => {
-        await this.publish(method, payload, agent.threadId);
-      },
-    });
-
     runtime.status = "turn_active";
     runtime.statusOverride = null;
     runtime.activeTurnId = turnId;
-    runtime.activeTurnInput = activeTurnInput;
     runtime.latestTurnId = turnId;
-    runtime.machine = machine;
     await this.publishThreadStatus(agent.threadId);
-    await machine.emitStarted();
-    await machine.emitUserMessage(activeTurnInput);
+    await this.publish("turn/started", {
+      threadId: agent.threadId,
+      turn: {
+        id: turnId,
+        status: "inProgress",
+        error: null,
+        items: [
+          {
+            type: "userMessage",
+            id: `${turnId}_user`,
+            content: toUserMessageContent([{ type: "text", text: message, text_elements: [] }]),
+          },
+        ],
+      },
+    });
     return turnId;
   }
 }

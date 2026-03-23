@@ -340,80 +340,112 @@ describe("PiBackend", () => {
       supportedToolTypes: [],
     });
 
-    const sessionId = await backend.createSession();
-    expect(sessionId.startsWith("pi_session_")).toBe(true);
-
-    const events: Array<{
-      type: string;
-      turnId?: string;
-      requestId?: string;
-      usage?: { modelContextWindow: number | null; total: number };
-    }> = [];
-    const subscription = backend.onEvent(sessionId, (event) => {
-      events.push(event);
-    });
-
     const selectedModel = models.at(1);
     if (!selectedModel) {
       throw new Error("Expected a second mock model");
     }
 
-    await backend.setSessionName(sessionId, "Primary session");
-    await backend.setModel(sessionId, selectedModel.id);
-    await backend.setModel(sessionId, "gpt-5.3-codex");
-    await backend.prompt(sessionId, "turn_1", "hello world", [
-      {
-        type: "image",
-        data: Buffer.from("image payload").toString("base64"),
-        mimeType: "image/png",
-      },
-    ]);
+    const threadId = "thread-pi-1";
+    const started = await backend.threadStart({
+      threadId,
+      cwd: sessionDir,
+      model: selectedModel.id,
+      reasoningEffort: "medium",
+    });
+    const threadHandle = started.threadHandle;
+    expect(threadHandle.startsWith("pi_session_")).toBe(true);
 
-    const elicitation = await waitFor(
-      () =>
-        events.find((event) => event.type === "elicitation_request") as
-          | { requestId: string }
-          | undefined
+    const notifications: Array<{ method: string; params: unknown }> = [];
+    const serverRequests: Array<{ requestId: string | number; method: string; params: unknown }> =
+      [];
+    const subscription = backend.onEvent(threadHandle, (event) => {
+      if (event.kind === "notification") {
+        notifications.push({ method: event.method, params: event.params });
+        return;
+      }
+      if (event.kind === "serverRequest") {
+        serverRequests.push({
+          requestId: event.requestId,
+          method: event.method,
+          params: event.params,
+        });
+      }
+    });
+
+    await backend.threadSetName({ threadId, threadHandle, name: "Primary session" });
+    await backend.setModel(threadHandle, selectedModel.id);
+    await backend.setModel(threadHandle, "gpt-5.3-codex");
+    await backend.turnStart({
+      threadId,
+      threadHandle,
+      turnId: "turn_1",
+      cwd: sessionDir,
+      input: [{ type: "text", text: "hello world", text_elements: [] }],
+      model: null,
+      reasoningEffort: "medium",
+    });
+
+    const elicitation = await waitFor(() =>
+      serverRequests.find((event) => event.method === "item/tool/requestUserInput")
     );
     expect(elicitation).toBeDefined();
 
-    await backend.respondToElicitation(sessionId, elicitation.requestId, { confirmed: true });
+    await backend.resolveServerRequest({
+      threadId,
+      threadHandle,
+      requestId: elicitation.requestId,
+      response: { result: { confirmed: true } },
+    });
     const tokenUsageEvent = await waitFor(
       () =>
-        events.find((event) => event.type === "token_usage") as
-          | { usage?: { modelContextWindow: number | null; total: number } }
+        notifications.find((event) => event.method === "thread/tokenUsage/updated") as
+          | {
+              params?: {
+                tokenUsage?: { modelContextWindow: number | null; last?: { totalTokens?: number } };
+              };
+            }
           | undefined
     );
 
-    expect(events.some((event) => event.type === "text_delta")).toBe(true);
-    expect(events.some((event) => event.type === "tool_start")).toBe(true);
-    expect(events.some((event) => event.type === "tool_update")).toBe(true);
-    expect(events.some((event) => event.type === "tool_end")).toBe(true);
-    expect(events.filter((event) => event.type === "message_end")).toHaveLength(1);
-    expect(events).toContainEqual(
-      expect.objectContaining({
-        type: "message_end",
-        text: "response-1",
-      })
-    );
+    expect(notifications.some((event) => event.method === "item/agentMessage/delta")).toBe(true);
     expect(
-      events
-        .filter(
-          (event) =>
-            event.type === "text_delta" ||
-            event.type === "tool_start" ||
-            event.type === "tool_update" ||
-            event.type === "tool_end" ||
-            event.type === "message_end"
-        )
-        .every((event) => event.turnId === "turn_1")
+      notifications.some(
+        (event) =>
+          event.method === "item/started" &&
+          (event.params as { item?: { type?: string } }).item?.type === "commandExecution"
+      )
     ).toBe(true);
-    expect(tokenUsageEvent.usage).toMatchObject({
+    expect(
+      notifications.some((event) => event.method === "item/commandExecution/outputDelta")
+    ).toBe(true);
+    expect(
+      notifications.some(
+        (event) =>
+          event.method === "item/completed" &&
+          (event.params as { item?: { type?: string } }).item?.type === "commandExecution"
+      )
+    ).toBe(true);
+    expect(
+      notifications.some(
+        (event) =>
+          event.method === "turn/completed" &&
+          (event.params as { turn?: { status?: string } }).turn?.status === "completed"
+      )
+    ).toBe(true);
+    expect(
+      (
+        tokenUsageEvent.params as {
+          tokenUsage: { modelContextWindow: number | null; last: { totalTokens: number } };
+        }
+      ).tokenUsage
+    ).toMatchObject({
       modelContextWindow: 272000,
-      total: 12,
+      last: {
+        totalTokens: 12,
+      },
     });
 
-    const history = await backend.readSessionHistory(sessionId);
+    const history = await backend.readSessionHistory(threadHandle);
     expect(history.some((message) => message.role === "user")).toBe(true);
     expect(history.some((message) => message.role === "assistant")).toBe(true);
     expect(history).toContainEqual(
@@ -429,18 +461,36 @@ describe("PiBackend", () => {
     );
     expect(history.some((message) => message.role === "system")).toBe(true);
 
-    const forkedSessionId = await backend.forkSession(sessionId);
-    expect(forkedSessionId).not.toBe(sessionId);
-    const forkedHistory = await backend.readSessionHistory(forkedSessionId);
+    const forked = await backend.threadFork({
+      threadId: "thread-pi-fork",
+      sourceThreadId: threadId,
+      sourceThreadHandle: threadHandle,
+      cwd: sessionDir,
+      model: null,
+      reasoningEffort: null,
+    });
+    expect(forked.threadHandle).not.toBe(threadHandle);
+    const forkedHistory = await backend.readSessionHistory(forked.threadHandle);
     expect(forkedHistory).toEqual(expect.any(Array));
 
     subscription.dispose();
-    const eventCount = events.length;
-    await backend.prompt(sessionId, "turn_2", "follow-up prompt");
+    const eventCount = notifications.length + serverRequests.length;
+    await backend.turnStart({
+      threadId,
+      threadHandle,
+      turnId: "turn_2",
+      cwd: sessionDir,
+      input: [{ type: "text", text: "follow-up prompt", text_elements: [] }],
+      model: null,
+      reasoningEffort: null,
+    });
     await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(events.length).toBe(eventCount);
+    expect(notifications.length + serverRequests.length).toBe(eventCount);
 
-    await backend.disposeSession(sessionId);
+    await backend.threadArchive({
+      threadId,
+      threadHandle,
+    });
     await backend.dispose();
 
     const logRecords = (await readFile(logFilePath, "utf8"))
@@ -494,8 +544,18 @@ describe("PiBackend", () => {
       args: [scriptPath, sessionDir],
     });
     await reopened.initialize();
-    await expect(reopened.resumeSession(sessionId)).resolves.toBe(sessionId);
-    const resumedHistory = await reopened.readSessionHistory(sessionId);
+    await expect(
+      reopened.threadResume({
+        threadId,
+        threadHandle,
+        cwd: sessionDir,
+        model: null,
+        reasoningEffort: null,
+      })
+    ).resolves.toMatchObject({
+      threadHandle,
+    });
+    const resumedHistory = await reopened.readSessionHistory(threadHandle);
     expect(resumedHistory).toEqual(expect.any(Array));
     await reopened.dispose();
   });

@@ -2,14 +2,35 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
+  BackendAppServerEvent,
   BackendCapabilities,
   BackendEvent,
   BackendImageInput,
   BackendMessage,
   BackendModelSummary,
+  BackendResolveServerRequestInput,
   BackendSessionLaunchConfig,
+  BackendThreadArchiveInput,
+  BackendThreadForkInput,
+  BackendThreadForkResult,
+  BackendThreadReadInput,
+  BackendThreadReadResult,
+  BackendThreadResumeInput,
+  BackendThreadResumeResult,
+  BackendThreadSetNameInput,
+  BackendThreadStartInput,
+  BackendThreadStartResult,
+  BackendTurnInterruptInput,
+  BackendTurnStartInput,
+  BackendTurnStartResult,
   Disposable,
   IBackend,
+} from "@codapter/core";
+import {
+  BackendThreadEventBuffer,
+  TurnStateMachine,
+  parseBackendModelId,
+  toThreadTokenUsage,
 } from "@codapter/core";
 import {
   type PiProcessLaunchOptions,
@@ -34,6 +55,14 @@ export interface PiBackendOptions {
 interface ManagedSession {
   readonly process: PiProcessSession;
   record: PiBackendSessionRecord;
+}
+
+interface PiThreadRuntime {
+  threadId: string;
+  activeTurnId: string | null;
+  machine: TurnStateMachine | null;
+  pendingElicitationPayloads: Map<string, unknown>;
+  processSubscription: Disposable | null;
 }
 
 const DEFAULT_CAPABILITIES: BackendCapabilities = {
@@ -90,7 +119,114 @@ function toRequestedModelCandidates(modelId: string): string[] {
   return [modelId, `openai-codex/${modelId}`];
 }
 
+function toUserMessageContent(input: BackendTurnStartInput["input"]) {
+  return input.map((item) => {
+    switch (item.type) {
+      case "text":
+        return { type: "text", text: item.text };
+      case "image":
+        return { type: "image", url: item.url };
+      case "localImage":
+        return { type: "localImage", path: item.path };
+      case "skill":
+        return { type: "skill", name: item.name, path: item.path };
+      case "mention":
+        return { type: "mention", name: item.name, path: item.path };
+    }
+  });
+}
+
+function normalizeTurnInput(input: BackendTurnStartInput["input"]): {
+  text: string;
+  images: BackendImageInput[];
+} {
+  const textParts: string[] = [];
+  const images: BackendImageInput[] = [];
+  for (const item of input) {
+    switch (item.type) {
+      case "text":
+        textParts.push(item.text);
+        break;
+      case "image":
+        images.push({ type: "image", url: item.url });
+        break;
+      case "localImage":
+        images.push({ type: "localImage", path: item.path });
+        break;
+      case "skill":
+      case "mention":
+        throw new Error(`Unsupported Pi turn input type: ${item.type}`);
+    }
+  }
+  return {
+    text: textParts.join("\n").trim(),
+    images,
+  };
+}
+
+function textFromUnknown(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value === null || value === undefined) {
+    return "";
+  }
+  return JSON.stringify(value);
+}
+
+function mapHistoryToTurns(history: readonly BackendMessage[]) {
+  const turns: Array<{
+    id: string;
+    items: Array<Record<string, unknown>>;
+    status: "completed";
+    error: null;
+  }> = [];
+  let current: {
+    id: string;
+    items: Array<Record<string, unknown>>;
+    status: "completed";
+    error: null;
+  } | null = null;
+
+  for (const message of history) {
+    if (message.role === "user") {
+      current = {
+        id: message.id,
+        items: [
+          {
+            type: "userMessage",
+            id: `${message.id}_user`,
+            content: [{ type: "text", text: textFromUnknown(message.content) }],
+          },
+        ],
+        status: "completed",
+        error: null,
+      };
+      turns.push(current);
+      continue;
+    }
+    if (!current) {
+      current = {
+        id: message.id,
+        items: [],
+        status: "completed",
+        error: null,
+      };
+      turns.push(current);
+    }
+    current.items.push({
+      type: "agentMessage",
+      id: `${message.id}_agent`,
+      text: textFromUnknown(message.content),
+      phase: null,
+    });
+  }
+
+  return turns;
+}
+
 export class PiBackend implements IBackend {
+  public readonly backendType = "pi";
   public readonly sessionDir: string;
 
   private readonly launchOptions: {
@@ -105,6 +241,8 @@ export class PiBackend implements IBackend {
   private readonly idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly modelCache = new Map<string, BackendModelSummary>();
   private readonly launchConfigs = new Map<string, BackendSessionLaunchConfig>();
+  private readonly eventBuffer = new BackendThreadEventBuffer();
+  private readonly threadRuntimes = new Map<string, PiThreadRuntime>();
   private initialized = false;
   private disposed = false;
   private capabilities: BackendCapabilities | null = null;
@@ -163,10 +301,144 @@ export class PiBackend implements IBackend {
 
     this.sessions.clear();
     this.modelCache.clear();
+    for (const runtime of this.threadRuntimes.values()) {
+      runtime.processSubscription?.dispose();
+    }
+    this.threadRuntimes.clear();
   }
 
   isAlive(): boolean {
     return this.initialized && !this.disposed;
+  }
+
+  parseModelSelection(model: string | null | undefined) {
+    if (!model) {
+      return null;
+    }
+    const parsed = parseBackendModelId(model);
+    if (!parsed || parsed.backendType !== this.backendType) {
+      return null;
+    }
+    return parsed;
+  }
+
+  async threadStart(input: BackendThreadStartInput): Promise<BackendThreadStartResult> {
+    const threadHandle = await this.createSession(input.launchConfig);
+    if (input.model) {
+      await this.setModel(threadHandle, input.model);
+    }
+    this.ensureThreadRuntime(threadHandle, input.threadId);
+    return {
+      threadHandle,
+      path: await this.getSessionPath(threadHandle),
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+    };
+  }
+
+  async threadResume(input: BackendThreadResumeInput): Promise<BackendThreadResumeResult> {
+    const threadHandle = await this.resumeSession(input.threadHandle, input.launchConfig);
+    if (input.model) {
+      await this.setModel(threadHandle, input.model);
+    }
+    this.ensureThreadRuntime(threadHandle, input.threadId);
+    return {
+      threadHandle,
+      path: await this.getSessionPath(threadHandle),
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+    };
+  }
+
+  async threadFork(input: BackendThreadForkInput): Promise<BackendThreadForkResult> {
+    const threadHandle = await this.forkSession(input.sourceThreadHandle, input.launchConfig);
+    if (input.model) {
+      await this.setModel(threadHandle, input.model);
+    }
+    this.ensureThreadRuntime(threadHandle, input.threadId);
+    return {
+      threadHandle,
+      path: await this.getSessionPath(threadHandle),
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+    };
+  }
+
+  async threadRead(input: BackendThreadReadInput): Promise<BackendThreadReadResult> {
+    const turns = input.includeTurns
+      ? mapHistoryToTurns(await this.readSessionHistory(input.threadHandle))
+      : [];
+    const runtime = this.threadRuntimes.get(input.threadHandle);
+    if (input.includeTurns && runtime?.machine) {
+      turns.push(runtime.machine.snapshot as unknown as (typeof turns)[number]);
+    }
+    const record = await this.requireRecord(input.threadHandle);
+    return {
+      threadHandle: input.threadHandle,
+      title: record.sessionName,
+      model: record.modelId,
+      turns: turns as unknown as BackendThreadReadResult["turns"],
+    };
+  }
+
+  async threadArchive(input: BackendThreadArchiveInput): Promise<void> {
+    await this.disposeSession(input.threadHandle);
+    const runtime = this.threadRuntimes.get(input.threadHandle);
+    runtime?.processSubscription?.dispose();
+    this.threadRuntimes.delete(input.threadHandle);
+  }
+
+  async threadSetName(input: BackendThreadSetNameInput): Promise<void> {
+    await this.setSessionName(input.threadHandle, input.name);
+  }
+
+  async turnStart(input: BackendTurnStartInput): Promise<BackendTurnStartResult> {
+    const runtime = this.ensureThreadRuntime(input.threadHandle, input.threadId);
+    runtime.activeTurnId = input.turnId;
+    runtime.machine = new TurnStateMachine(input.threadId, input.turnId, input.cwd, {
+      notify: async (method, params) => {
+        this.eventBuffer.emit(input.threadHandle, {
+          kind: "notification",
+          threadHandle: input.threadHandle,
+          method,
+          params,
+        });
+      },
+    });
+    await runtime.machine.emitStarted();
+    const userContent = toUserMessageContent(input.input);
+    if (userContent.length > 0) {
+      await runtime.machine.emitUserMessage(userContent as never);
+    }
+
+    if (input.model) {
+      await this.setModel(input.threadHandle, input.model);
+    }
+
+    const normalized = normalizeTurnInput(input.input);
+    await this.prompt(input.threadHandle, input.turnId, normalized.text, normalized.images);
+    return { accepted: true };
+  }
+
+  async turnInterrupt(input: BackendTurnInterruptInput): Promise<void> {
+    await this.abort(input.threadHandle);
+    const runtime = this.threadRuntimes.get(input.threadHandle);
+    if (runtime?.machine && runtime.activeTurnId === input.turnId) {
+      await runtime.machine.interrupt();
+      runtime.machine = null;
+      runtime.activeTurnId = null;
+    }
+  }
+
+  async resolveServerRequest(input: BackendResolveServerRequestInput): Promise<void> {
+    const runtime = this.threadRuntimes.get(input.threadHandle);
+    const payload = runtime?.pendingElicitationPayloads.get(String(input.requestId));
+    runtime?.pendingElicitationPayloads.delete(String(input.requestId));
+    await this.respondToElicitation(
+      input.threadHandle,
+      String(input.requestId),
+      (input.response as { result?: unknown })?.result ?? payload ?? { cancelled: true }
+    );
   }
 
   async createSession(config?: BackendSessionLaunchConfig): Promise<string> {
@@ -239,6 +511,9 @@ export class PiBackend implements IBackend {
       this.sessions.delete(sessionId);
     }
     this.launchConfigs.delete(sessionId);
+    const runtime = this.threadRuntimes.get(sessionId);
+    runtime?.processSubscription?.dispose();
+    this.threadRuntimes.delete(sessionId);
   }
 
   async readSessionHistory(sessionId: string): Promise<BackendMessage[]> {
@@ -360,36 +635,10 @@ export class PiBackend implements IBackend {
     });
   }
 
-  onEvent(sessionId: string, listener: (event: BackendEvent) => void): Disposable {
+  onEvent(threadHandle: string, listener: (event: BackendAppServerEvent) => void): Disposable {
     this.assertReady();
-    const wrappedListener = (event: BackendEvent) => {
-      this.resetIdleTimer(sessionId);
-      listener(event);
-    };
-
-    const session = this.sessions.get(sessionId);
-    if (session?.process.isRunning()) {
-      return session.process.addListener(wrappedListener);
-    }
-
-    let disposed = false;
-    let listenerDisposable: Disposable | null = null;
-    const disposable: Disposable = {
-      dispose(): void {
-        disposed = true;
-        listenerDisposable?.dispose();
-      },
-    };
-
-    void this.ensureActiveSession(sessionId).then((active) => {
-      if (!disposed) {
-        listenerDisposable = active.process.addListener(wrappedListener);
-      } else {
-        listenerDisposable?.dispose();
-      }
-    });
-
-    return disposable;
+    this.ensureThreadRuntime(threadHandle);
+    return this.eventBuffer.subscribe(threadHandle, listener);
   }
 
   private resetIdleTimer(sessionId: string): void {
@@ -478,6 +727,102 @@ export class PiBackend implements IBackend {
     this.sessions.set(sessionId, session);
 
     return session;
+  }
+
+  private ensureThreadRuntime(threadHandle: string, threadId = threadHandle): PiThreadRuntime {
+    const existing = this.threadRuntimes.get(threadHandle);
+    if (existing) {
+      existing.threadId = threadId;
+      if (!existing.processSubscription) {
+        existing.processSubscription = this.subscribeProcessEvents(threadHandle);
+      }
+      return existing;
+    }
+
+    const runtime: PiThreadRuntime = {
+      threadId,
+      activeTurnId: null,
+      machine: null,
+      pendingElicitationPayloads: new Map(),
+      processSubscription: null,
+    };
+    this.threadRuntimes.set(threadHandle, runtime);
+    runtime.processSubscription = this.subscribeProcessEvents(threadHandle);
+    return runtime;
+  }
+
+  private subscribeProcessEvents(threadHandle: string): Disposable {
+    const wrappedListener = (event: BackendEvent) => {
+      this.resetIdleTimer(threadHandle);
+      void this.handleProcessEvent(threadHandle, event);
+    };
+
+    const session = this.sessions.get(threadHandle);
+    if (session?.process.isRunning()) {
+      return session.process.addListener(wrappedListener);
+    }
+
+    let disposed = false;
+    let listenerDisposable: Disposable | null = null;
+    const disposable: Disposable = {
+      dispose(): void {
+        disposed = true;
+        listenerDisposable?.dispose();
+      },
+    };
+
+    void this.ensureActiveSession(threadHandle).then((active) => {
+      if (!disposed) {
+        listenerDisposable = active.process.addListener(wrappedListener);
+      } else {
+        listenerDisposable?.dispose();
+      }
+    });
+
+    return disposable;
+  }
+
+  private async handleProcessEvent(threadHandle: string, event: BackendEvent): Promise<void> {
+    const runtime = this.threadRuntimes.get(threadHandle);
+    if (!runtime) {
+      return;
+    }
+
+    if (event.type === "token_usage") {
+      this.eventBuffer.emit(threadHandle, {
+        kind: "notification",
+        threadHandle,
+        method: "thread/tokenUsage/updated",
+        params: {
+          threadId: runtime.threadId,
+          turnId: event.turnId,
+          tokenUsage: toThreadTokenUsage(event.usage),
+        },
+      });
+      return;
+    }
+
+    if (event.type === "elicitation_request") {
+      runtime.pendingElicitationPayloads.set(event.requestId, event.payload);
+      this.eventBuffer.emit(threadHandle, {
+        kind: "serverRequest",
+        threadHandle,
+        requestId: event.requestId,
+        method: "item/tool/requestUserInput",
+        params: event.payload,
+      });
+      return;
+    }
+
+    if (!runtime.machine || runtime.activeTurnId !== event.turnId) {
+      return;
+    }
+
+    const completed = await runtime.machine.handleEvent(event);
+    if (completed) {
+      runtime.machine = null;
+      runtime.activeTurnId = null;
+    }
   }
 
   private async requireRecord(sessionId: string): Promise<PiBackendSessionRecord> {
