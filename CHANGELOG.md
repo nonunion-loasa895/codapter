@@ -8,7 +8,12 @@
 
 ### Changed
 
+- Broadened project intro to describe codapter as an adapter for any client built around the Codex app-server protocol, not just Codex Desktop. ([#5](https://github.com/kcosr/codapter/pull/5))
+- Simplified README project structure to a directory-level overview to prevent staleness; detailed source layout now lives in `docs/architecture.md`. ([#5](https://github.com/kcosr/codapter/pull/5))
+
 ### Fixed
+
+- Fixed stale documentation across README, api-mapping, architecture, integration, and backend-interface docs: corrected config persistence claims, added 6 missing RPC methods to supported table, fixed `command/exec/resize` description, fixed reasoning notification name (`summaryTextDelta`), fixed WebSocket path, updated elicitation status, added collab architecture section, added `getSessionPath()` to backend-interface, added `CODAPTER_COLLAB_EXTENSION_PATH` env var and `--collab` flag to docs, and updated IBackend mermaid diagram to match actual interface. ([#5](https://github.com/kcosr/codapter/pull/5))
 
 ### Removed
 
