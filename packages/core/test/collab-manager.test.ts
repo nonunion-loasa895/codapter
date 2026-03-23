@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import type { BackendEvent, IBackend } from "../src/backend.js";
+import { BackendRouter } from "../src/backend-router.js";
+import { parseBackendModelId } from "../src/backend.js";
+import type { BackendAppServerEvent, BackendEvent, IBackend } from "../src/backend.js";
 import { CollabManager } from "../src/collab-manager.js";
 import type { CollabManagerNotificationSink } from "../src/collab-manager.js";
 import type { CollabManagerCreateChildThreadInput } from "../src/collab-manager.js";
 
 class TestBackend implements IBackend {
-  private readonly listeners = new Map<string, Set<(event: BackendEvent) => void>>();
+  public readonly backendType = "pi";
+  private readonly listeners = new Map<string, Set<(event: BackendAppServerEvent) => void>>();
   private sessionCounter = 0;
   public prompts: Array<{ sessionId: string; turnId: string; text: string }> = [];
   public abortedSessionIds: string[] = [];
@@ -15,6 +18,16 @@ class TestBackend implements IBackend {
   async dispose() {}
   isAlive() {
     return true;
+  }
+  parseModelSelection(model: string | null | undefined) {
+    if (!model) {
+      return null;
+    }
+    const parsed = parseBackendModelId(model);
+    if (!parsed || parsed.backendType !== this.backendType) {
+      return null;
+    }
+    return parsed;
   }
   async createSession() {
     this.sessionCounter += 1;
@@ -57,8 +70,75 @@ class TestBackend implements IBackend {
     };
   }
   async respondToElicitation() {}
-  onEvent(sessionId: string, listener: (event: BackendEvent) => void) {
-    const listeners = this.listeners.get(sessionId) ?? new Set<(event: BackendEvent) => void>();
+  async threadStart(input: {
+    threadId: string;
+    model: string | null;
+    reasoningEffort: string | null;
+  }) {
+    const sessionId = await this.createSession();
+    return {
+      threadHandle: sessionId,
+      path: `/sessions/${sessionId}.jsonl`,
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+    };
+  }
+  async threadResume(input: {
+    threadHandle: string;
+    model: string | null;
+    reasoningEffort: string | null;
+  }) {
+    return {
+      threadHandle: input.threadHandle,
+      path: `/sessions/${input.threadHandle}.jsonl`,
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+    };
+  }
+  async threadFork(input: {
+    sourceThreadHandle: string;
+    model: string | null;
+    reasoningEffort: string | null;
+  }) {
+    const sessionId = await this.forkSession(input.sourceThreadHandle);
+    return {
+      threadHandle: sessionId,
+      path: `/sessions/${sessionId}.jsonl`,
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+    };
+  }
+  async threadRead(input: { threadHandle: string }) {
+    return {
+      threadHandle: input.threadHandle,
+      title: null,
+      model: null,
+      turns: [],
+    };
+  }
+  async threadArchive(input: { threadHandle: string }) {
+    await this.disposeSession(input.threadHandle);
+  }
+  async threadSetName() {}
+  async turnStart(input: {
+    threadHandle: string;
+    turnId: string;
+    input: Array<{ text?: string; type: string }>;
+  }) {
+    const text = input.input
+      .filter((entry) => entry.type === "text")
+      .map((entry) => entry.text ?? "")
+      .join("\n");
+    this.prompts.push({ sessionId: input.threadHandle, turnId: input.turnId, text });
+    return { accepted: true as const };
+  }
+  async turnInterrupt(input: { threadHandle: string }) {
+    this.abortedSessionIds.push(input.threadHandle);
+  }
+  async resolveServerRequest() {}
+  onEvent(sessionId: string, listener: (event: BackendAppServerEvent) => void) {
+    const listeners =
+      this.listeners.get(sessionId) ?? new Set<(event: BackendAppServerEvent) => void>();
     listeners.add(listener);
     this.listeners.set(sessionId, listeners);
     return {
@@ -70,7 +150,56 @@ class TestBackend implements IBackend {
 
   emit(sessionId: string, event: BackendEvent) {
     for (const listener of this.listeners.get(sessionId) ?? []) {
-      listener(event);
+      if (event.type === "text_delta") {
+        listener({
+          kind: "notification",
+          threadHandle: sessionId,
+          method: "item/agentMessage/delta",
+          params: { threadId: sessionId, turnId: event.turnId, itemId: "msg", delta: event.delta },
+        });
+        continue;
+      }
+      if (event.type === "message_end") {
+        if (typeof event.text === "string" && event.text.length > 0) {
+          listener({
+            kind: "notification",
+            threadHandle: sessionId,
+            method: "item/agentMessage/delta",
+            params: {
+              threadId: sessionId,
+              turnId: event.turnId,
+              itemId: "msg",
+              delta: event.text,
+            },
+          });
+        }
+        listener({
+          kind: "notification",
+          threadHandle: sessionId,
+          method: "turn/completed",
+          params: {
+            threadId: sessionId,
+            turn: { id: event.turnId, items: [], status: "completed", error: null },
+          },
+        });
+        continue;
+      }
+      if (event.type === "error") {
+        listener({
+          kind: "notification",
+          threadHandle: sessionId,
+          method: "turn/completed",
+          params: {
+            threadId: sessionId,
+            turn: {
+              id: event.turnId,
+              items: [],
+              status: "failed",
+              error: { message: event.message, codexErrorInfo: null, additionalDetails: null },
+            },
+          },
+        });
+      }
     }
   }
 }
@@ -90,7 +219,7 @@ function createManager(options: {
   const childThreadInputs: CollabManagerCreateChildThreadInput[] = [];
 
   const manager = new CollabManager({
-    backend,
+    backendRouter: new BackendRouter([backend]),
     notifySink:
       options.notifySink ??
       ({
@@ -101,8 +230,11 @@ function createManager(options: {
     resolveParentTurnId(threadId) {
       return `turn:${threadId}`;
     },
-    resolveThreadSessionId(threadId) {
+    resolveThreadHandle(threadId) {
       return `session:${threadId}`;
+    },
+    resolveThreadBackendType() {
+      return "pi";
     },
     async createChildThread(input) {
       childThreadIds.push(input.threadId);
