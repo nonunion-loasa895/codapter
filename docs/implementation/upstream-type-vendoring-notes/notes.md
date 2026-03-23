@@ -52,7 +52,7 @@ Vendoring improves the typing side, not the transport-framing side.
 
 ### Codex
 
-Vendor Codex protocol types for the future `packages/backend-codex` boundary.
+Vendor Codex protocol types for the `packages/backend-codex` boundary.
 
 Use them for:
 
@@ -142,7 +142,7 @@ Recommended order:
 
 1. finish backend routing and the new backend boundary design,
 2. implement the new routed backend contract in code,
-3. add Codex vendoring once `packages/backend-codex` exists or is being implemented,
+3. add Codex vendoring now that `packages/backend-codex` is implemented,
 4. add Pi vendoring later only if backend-pi parsing work is active.
 
 Default policy:

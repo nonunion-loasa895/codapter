@@ -6,9 +6,17 @@
 
 ### Added
 
+- Added Codex smoke coverage (`test/smoke/codex.smoke.test.ts`) and expanded Codex backend unit coverage for thread lifecycle and disconnect-event paths. ([#000](<pr-url>))
+
 ### Changed
 
+- Refactored codapter to a routed multi-backend architecture, added the Codex stdio proxy backend, and made sub-agent routing backend-aware for Pi parent -> Codex child flows. ([#000](<pr-url>))
+- Aligned README/integration/API-mapping/onboarding docs with the routed Pi+Codex backend contract, corrected adapter identity defaults in docs, and updated smoke test guidance/scripts to include Codex smoke coverage. ([#000](<pr-url>))
+- Renamed the local Codex Desktop launcher from `scripts/pi.sh` to `scripts/codapter.sh` and updated onboarding/debug-log references to the new script and log paths. ([#000](<pr-url>))
+
 ### Fixed
+
+- Fixed adapter identity version reporting by aligning `ADAPTER_VERSION` with the package version (`0.0.3`). ([#000](<pr-url>))
 
 ### Removed
 

@@ -14,7 +14,7 @@
     "lint": "biome check .",
     "prepare": "husky",
     "test": "vitest run --passWithNoTests",
-    "test:smoke": "PI_SMOKE_TEST=1 vitest run test/smoke/"
+    "test:smoke": "PI_SMOKE_TEST=1 CODEX_SMOKE_TEST=1 vitest run test/smoke/"
   },
   "lint-staged": {
     "*.{js,mjs,cjs,ts,tsx,json,md}": ["biome check --write --no-errors-on-unmatched"]

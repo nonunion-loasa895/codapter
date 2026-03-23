@@ -28,6 +28,27 @@ async function createMockCodexScript(rootDir: string): Promise<string> {
     "    write({ id: payload.id, result: { thread: { id: 'thr_mock', path: '/tmp/thr_mock.jsonl', turns: [] }, model: payload.params.model ?? 'gpt-5.4', reasoningEffort: 'medium' } });",
     "    return;",
     "  }",
+    "  if (payload.method === 'thread/resume') {",
+    "    write({ id: payload.id, result: { thread: { id: payload.params.threadId, path: '/tmp/' + payload.params.threadId + '.jsonl', turns: [] }, model: payload.params.model ?? 'gpt-5.4', reasoningEffort: 'medium' } });",
+    "    return;",
+    "  }",
+    "  if (payload.method === 'thread/fork') {",
+    "    const forkId = payload.params.threadId + '_fork';",
+    "    write({ id: payload.id, result: { thread: { id: forkId, path: '/tmp/' + forkId + '.jsonl', turns: [] }, model: payload.params.model ?? 'gpt-5.4', reasoningEffort: 'medium' } });",
+    "    return;",
+    "  }",
+    "  if (payload.method === 'thread/read') {",
+    "    write({ id: payload.id, result: { thread: { id: payload.params.threadId, path: '/tmp/' + payload.params.threadId + '.jsonl', turns: [{ id: 'turn_hist_1', items: [{ type: 'agentMessage', id: 'msg_hist_1', text: 'history', phase: null }], status: 'completed', error: null }] }, model: payload.params.model ?? 'gpt-5.4', reasoningEffort: 'medium' } });",
+    "    return;",
+    "  }",
+    "  if (payload.method === 'thread/archive' || payload.method === 'thread/name/set') {",
+    "    write({ id: payload.id, result: {} });",
+    "    return;",
+    "  }",
+    "  if (payload.method === 'turn/interrupt') {",
+    "    write({ id: payload.id, result: {} });",
+    "    return;",
+    "  }",
     "  if (payload.method === 'turn/start') {",
     "    write({ id: payload.id, result: { turn: { id: 'turn_1', items: [], status: 'inProgress', error: null } } });",
     "    setTimeout(() => {",
@@ -36,6 +57,54 @@ async function createMockCodexScript(rootDir: string): Promise<string> {
     "      write({ method: 'item/agentMessage/delta', params: { threadId: payload.params.threadId, turnId: 'turn_1', itemId: 'msg_1', delta: 'done' } });",
     "      write({ method: 'turn/completed', params: { threadId: payload.params.threadId, turn: { id: 'turn_1', items: [], status: 'completed', error: null } } });",
     "    }, 10);",
+    "    return;",
+    "  }",
+    "}",
+    "",
+    "process.stdin.on('data', (chunk) => {",
+    "  buffer += decoder.write(chunk);",
+    "  const lines = buffer.split('\\n');",
+    "  buffer = lines.pop() ?? '';",
+    "  for (const line of lines) {",
+    "    if (!line.trim()) continue;",
+    "    const parsed = JSON.parse(line);",
+    "    if ('method' in parsed) {",
+    "      handleMessage(parsed);",
+    "    }",
+    "  }",
+    "});",
+  ].join("\n");
+  await writeFile(scriptPath, script, "utf8");
+  return scriptPath;
+}
+
+async function createExitOnTurnStartScript(rootDir: string): Promise<string> {
+  const scriptPath = join(rootDir, "mock-codex-exit-on-turn.mjs");
+  const script = [
+    "import { StringDecoder } from 'node:string_decoder';",
+    "const decoder = new StringDecoder('utf8');",
+    "let buffer = '';",
+    "",
+    "function write(value) {",
+    "  process.stdout.write(JSON.stringify(value) + '\\n');",
+    "}",
+    "",
+    "function handleMessage(payload) {",
+    "  if (payload.method === 'initialize') {",
+    "    write({ id: payload.id, result: { userAgent: 'mock-codex', platformFamily: 'unix', platformOs: 'linux' } });",
+    "    return;",
+    "  }",
+    "  if (payload.method === 'model/list') {",
+    "    write({ id: payload.id, result: { data: [{ id: 'gpt-5.4', model: 'gpt-5.4', displayName: 'GPT-5.4', description: 'mock', hidden: false, isDefault: true, inputModalities: ['text'], supportedReasoningEfforts: [{ reasoningEffort: 'medium', description: 'Balanced' }], defaultReasoningEffort: 'medium', supportsPersonality: true }] } });",
+    "    return;",
+    "  }",
+    "  if (payload.method === 'thread/start') {",
+    "    write({ id: payload.id, result: { thread: { id: 'thr_exit', path: '/tmp/thr_exit.jsonl', turns: [] }, model: payload.params.model ?? 'gpt-5.4', reasoningEffort: 'medium' } });",
+    "    return;",
+    "  }",
+    "  if (payload.method === 'turn/start') {",
+    "    write({ id: payload.id, result: { turn: { id: 'turn_exit', items: [], status: 'inProgress', error: null } } });",
+    "    setTimeout(() => process.exit(0), 10);",
     "    return;",
     "  }",
     "}",
@@ -140,5 +209,111 @@ describe("CodexBackend", () => {
       "Codex websocket transport is deferred in this implementation"
     );
     expect(backend.isAlive()).toBe(false);
+  });
+
+  it("supports codex thread lifecycle relay methods", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codapter-codex-test-"));
+    const mockScript = await createMockCodexScript(root);
+    const backend = createCodexBackend({
+      command: "node",
+      args: [mockScript],
+    });
+    await backend.initialize();
+
+    const started = await backend.threadStart({
+      threadId: "thr_local",
+      cwd: process.cwd(),
+      model: "gpt-5.4",
+      reasoningEffort: "medium",
+      launchConfig: {},
+    });
+    expect(started.threadHandle).toBe("thr_mock");
+
+    await expect(
+      backend.threadSetName({
+        threadId: "thr_local",
+        threadHandle: started.threadHandle,
+        name: "Renamed",
+      })
+    ).resolves.toBeUndefined();
+
+    const resumed = await backend.threadResume({
+      threadId: "thr_local",
+      threadHandle: started.threadHandle,
+      cwd: process.cwd(),
+      model: "gpt-5.4",
+      reasoningEffort: "medium",
+      launchConfig: {},
+    });
+    expect(resumed.threadHandle).toBe("thr_mock");
+
+    const forked = await backend.threadFork({
+      threadId: "thr_fork",
+      sourceThreadId: "thr_local",
+      sourceThreadHandle: started.threadHandle,
+      cwd: process.cwd(),
+      model: "gpt-5.4",
+      reasoningEffort: "medium",
+      launchConfig: {},
+    });
+    expect(forked.threadHandle).toBe("thr_mock_fork");
+
+    const read = await backend.threadRead({
+      threadId: "thr_local",
+      threadHandle: started.threadHandle,
+      includeTurns: true,
+      cwd: process.cwd(),
+    });
+    expect(read.turns).toHaveLength(1);
+
+    await expect(
+      backend.threadArchive({
+        threadId: "thr_local",
+        threadHandle: started.threadHandle,
+      })
+    ).resolves.toBeUndefined();
+
+    await backend.dispose();
+  });
+
+  it("emits disconnect events when the codex subprocess exits unexpectedly", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codapter-codex-test-"));
+    const mockScript = await createExitOnTurnStartScript(root);
+    const backend = createCodexBackend({
+      command: "node",
+      args: [mockScript],
+    });
+    await backend.initialize();
+
+    const started = await backend.threadStart({
+      threadId: "thr_local",
+      cwd: process.cwd(),
+      model: "gpt-5.4",
+      reasoningEffort: "medium",
+      launchConfig: {},
+    });
+
+    const events: Array<{ kind: string; message?: string }> = [];
+    const subscription = backend.onEvent(started.threadHandle, (event) => {
+      if (event.kind === "disconnect") {
+        events.push({ kind: event.kind, message: event.message });
+      }
+    });
+
+    await backend.turnStart({
+      threadId: "thr_local",
+      threadHandle: started.threadHandle,
+      turnId: "turn_local",
+      cwd: process.cwd(),
+      input: [{ type: "text", text: "trigger exit", text_elements: [] }],
+      model: "gpt-5.4",
+      reasoningEffort: "medium",
+    });
+
+    await waitFor(() => events.some((event) => event.kind === "disconnect"));
+    expect(events.some((event) => event.message?.includes("exited"))).toBe(true);
+
+    subscription.dispose();
+    await backend.dispose();
   });
 });
