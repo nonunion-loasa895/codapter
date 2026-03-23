@@ -226,6 +226,7 @@ export interface BackendTurnStartInput {
 
 export interface BackendTurnStartResult {
   readonly accepted: true;
+  readonly turnId?: string | null;
 }
 
 export interface BackendTurnInterruptInput {

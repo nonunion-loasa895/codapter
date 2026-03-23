@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import { validateHeaderValue } from "node:http";
 import { dirname, resolve } from "node:path";
-import { BackendRouter } from "./backend-router.js";
+import { BackendRouter, type RoutedBackendSelection } from "./backend-router.js";
 import type {
   BackendAppServerEvent,
   BackendImageInput,
@@ -12,6 +12,7 @@ import type {
   Disposable,
   IBackend,
 } from "./backend.js";
+import { parseBackendModelId } from "./backend.js";
 import {
   CollabManager,
   type CollabManagerCreateChildThreadInput,
@@ -1186,7 +1187,7 @@ export class AppServerConnection {
       null,
       null
     );
-    const selection = await this.backendRouter.resolveModelSelection(effectiveModel);
+    const selection = await this.resolveThreadStartSelection(effectiveModel, ephemeral);
     const backend = selection.backend;
     const threadStart = await backend.threadStart({
       threadId,
@@ -1196,7 +1197,9 @@ export class AppServerConnection {
       launchConfig: this.createBackendSessionLaunchConfig(threadId),
     });
     const selectedModel =
-      effectiveModel ?? `${selection.selection.backendType}::${selection.selection.rawModelId}`;
+      effectiveModel && parseBackendModelId(effectiveModel)
+        ? effectiveModel
+        : `${selection.selection.backendType}::${selection.selection.rawModelId}`;
 
     const entry = await this.threadRegistry.create({
       threadId,
@@ -1691,8 +1694,9 @@ export class AppServerConnection {
 
     await this.publishThreadStatus(parsed.threadId);
 
+    let backendTurnId: string = turnId;
     try {
-      await backend.turnStart({
+      const startedTurn = await backend.turnStart({
         threadId: parsed.threadId,
         threadHandle: runtime.threadHandle,
         turnId,
@@ -1701,27 +1705,22 @@ export class AppServerConnection {
         model: requestedSelection?.selection.rawModelId ?? null,
         reasoningEffort: effectiveReasoningEffort,
       });
+      if (startedTurn.turnId) {
+        backendTurnId = startedTurn.turnId;
+        runtime.activeTurnId = startedTurn.turnId;
+        runtime.latestTurnId = startedTurn.turnId;
+      }
     } catch (error) {
       await this.finishTurn(parsed.threadId, turnId);
       throw error;
     }
 
-    const turnInput = toUserMessageContent(parsed.input);
     return {
       turn: {
-        id: turnId,
+        id: backendTurnId,
         status: "inProgress",
         error: null,
-        items:
-          turnInput.length > 0
-            ? [
-                {
-                  type: "userMessage",
-                  id: `${turnId}_user`,
-                  content: turnInput,
-                },
-              ]
-            : [],
+        items: [],
       },
     };
   }
@@ -1788,7 +1787,11 @@ export class AppServerConnection {
 
     switch (event.kind) {
       case "notification":
-        await this.publish(event.method, event.params, threadId);
+        await this.publish(
+          event.method,
+          this.rewriteBackendThreadReferences(threadId, event.threadHandle, event.params),
+          threadId
+        );
         if (event.method === "turn/started" && turnId && runtime) {
           runtime.status = "turn_active";
           runtime.activeTurnId = turnId;
@@ -1810,7 +1813,7 @@ export class AppServerConnection {
         await this.send({
           id: requestId,
           method: event.method,
-          params: event.params,
+          params: this.rewriteBackendThreadReferences(threadId, event.threadHandle, event.params),
         }).catch(() => {
           this.pendingBackendServerRequests.delete(requestId);
         });
@@ -2038,6 +2041,63 @@ export class AppServerConnection {
       throw new Error(`Thread ${threadId} is not ready (status: ${runtime.status})`);
     }
     return runtime;
+  }
+
+  private async resolveThreadStartSelection(
+    model: string | null,
+    ephemeral: boolean
+  ): Promise<RoutedBackendSelection> {
+    try {
+      return await this.backendRouter.resolveModelSelection(model);
+    } catch (error) {
+      if (!ephemeral || !model || parseBackendModelId(model)) {
+        throw error;
+      }
+      const codexBackend = this.backendRouter.getBackend("codex");
+      if (!codexBackend || !codexBackend.isAlive()) {
+        throw error;
+      }
+      return {
+        backend: codexBackend,
+        selection: {
+          backendType: codexBackend.backendType,
+          rawModelId: model,
+        },
+      };
+    }
+  }
+
+  private rewriteBackendThreadReferences(
+    threadId: string,
+    threadHandle: string,
+    value: unknown
+  ): unknown {
+    if (Array.isArray(value)) {
+      return value.map((entry) =>
+        this.rewriteBackendThreadReferences(threadId, threadHandle, entry)
+      );
+    }
+    if (!isRecord(value)) {
+      return value;
+    }
+
+    const rewritten: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      rewritten[key] = this.rewriteBackendThreadReferences(threadId, threadHandle, entry);
+    }
+
+    if (rewritten.threadId === threadHandle) {
+      rewritten.threadId = threadId;
+    }
+
+    if (isRecord(rewritten.thread) && rewritten.thread.id === threadHandle) {
+      rewritten.thread = {
+        ...rewritten.thread,
+        id: threadId,
+      };
+    }
+
+    return rewritten;
   }
 
   private initRuntime(threadId: string, backendType: string, threadHandle: string): ThreadRuntime {

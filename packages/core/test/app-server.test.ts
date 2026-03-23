@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AppServerConnection } from "../src/app-server.js";
+import { BackendRouter } from "../src/backend-router.js";
 import { parseBackendModelId } from "../src/backend.js";
 import type {
   BackendAppServerEvent,
@@ -364,6 +365,127 @@ class TestBackend implements IBackend {
 
 function createBackend(onPromptCallback?: ConstructorParameters<typeof TestBackend>[0]): IBackend {
   return new TestBackend(onPromptCallback);
+}
+
+class CodexProxyTestBackend implements IBackend {
+  public readonly backendType = "codex";
+  private readonly listeners = new Map<string, Set<(event: BackendAppServerEvent) => void>>();
+  public readonly threadStartCalls: Array<{ model: string | null; threadId: string }> = [];
+  public readonly resolvedServerRequests: Array<{ requestId: string | number; response: unknown }> =
+    [];
+
+  async initialize() {}
+  async dispose() {}
+
+  isAlive() {
+    return true;
+  }
+
+  async listModels() {
+    return [
+      {
+        id: "gpt-5.4-mini",
+        model: "gpt-5.4-mini",
+        displayName: "GPT-5.4 Mini",
+        description: "Codex test model",
+        hidden: false,
+        isDefault: true,
+        inputModalities: ["text"],
+        supportedReasoningEfforts: [
+          {
+            reasoningEffort: "medium",
+            description: "Balanced reasoning",
+          },
+        ],
+        defaultReasoningEffort: "medium",
+        supportsPersonality: true,
+      },
+    ];
+  }
+
+  parseModelSelection(model: string | null | undefined) {
+    if (!model) {
+      return null;
+    }
+    const parsed = parseBackendModelId(model);
+    return parsed?.backendType === this.backendType ? parsed : null;
+  }
+
+  async threadStart(input: { threadId: string; model: string | null }) {
+    this.threadStartCalls.push({ threadId: input.threadId, model: input.model });
+    return {
+      threadHandle: "codex_thread_handle",
+      path: "/tmp/codex-thread.jsonl",
+      model: input.model,
+      reasoningEffort: "medium",
+    };
+  }
+
+  async threadResume(input: { threadHandle: string; model: string | null }) {
+    return {
+      threadHandle: input.threadHandle,
+      path: "/tmp/codex-thread.jsonl",
+      model: input.model,
+      reasoningEffort: "medium",
+    };
+  }
+
+  async threadFork(input: { sourceThreadHandle: string; model: string | null }) {
+    return {
+      threadHandle: `${input.sourceThreadHandle}_fork`,
+      path: "/tmp/codex-thread-fork.jsonl",
+      model: input.model,
+      reasoningEffort: "medium",
+    };
+  }
+
+  async threadRead(input: { threadHandle: string }) {
+    return {
+      threadHandle: input.threadHandle,
+      title: null,
+      model: "gpt-5.4-mini",
+      turns: [],
+    };
+  }
+
+  async threadArchive() {}
+  async threadSetName() {}
+
+  async turnStart() {
+    return {
+      accepted: true as const,
+      turnId: "turn_backend",
+    };
+  }
+
+  async turnInterrupt() {}
+
+  async resolveServerRequest(input: { requestId: string | number; response: unknown }) {
+    this.resolvedServerRequests.push({
+      requestId: input.requestId,
+      response: input.response,
+    });
+  }
+
+  onEvent(threadHandle: string, listener: (event: BackendAppServerEvent) => void) {
+    const listeners = this.listeners.get(threadHandle) ?? new Set();
+    listeners.add(listener);
+    this.listeners.set(threadHandle, listeners);
+    return {
+      dispose: () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) {
+          this.listeners.delete(threadHandle);
+        }
+      },
+    };
+  }
+
+  emit(threadHandle: string, event: BackendAppServerEvent) {
+    for (const listener of this.listeners.get(threadHandle) ?? []) {
+      listener(event);
+    }
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -3819,5 +3941,247 @@ describe("AppServerConnection", () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it("rewrites proxied backend thread ids before publishing to the client", async () => {
+    const backend = new CodexProxyTestBackend();
+    const outbound: Array<Record<string, unknown>> = [];
+    const connection = new AppServerConnection({
+      backendRouter: new BackendRouter([backend]),
+      onMessage(message) {
+        outbound.push(message as Record<string, unknown>);
+      },
+    });
+
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    const started = (await connection.handleMessage({
+      id: 2,
+      method: "thread/start",
+      params: {
+        cwd: "/repo",
+        model: "codex::gpt-5.4-mini",
+        experimentalRawEvents: false,
+        persistExtendedHistory: false,
+      },
+    })) as { result: { thread: { id: string } } };
+    const threadId = started.result.thread.id;
+
+    backend.emit("codex_thread_handle", {
+      kind: "notification",
+      threadHandle: "codex_thread_handle",
+      method: "thread/started",
+      params: {
+        thread: {
+          id: "codex_thread_handle",
+          turns: [],
+        },
+      },
+    });
+    backend.emit("codex_thread_handle", {
+      kind: "notification",
+      threadHandle: "codex_thread_handle",
+      method: "turn/started",
+      params: {
+        threadId: "codex_thread_handle",
+        turn: {
+          id: "turn_backend",
+          items: [],
+          status: "inProgress",
+          error: null,
+        },
+      },
+    });
+    backend.emit("codex_thread_handle", {
+      kind: "serverRequest",
+      threadHandle: "codex_thread_handle",
+      requestId: "backend-request-1",
+      method: "item/tool/requestUserInput",
+      params: {
+        threadId: "codex_thread_handle",
+        turnId: "turn_backend",
+        itemId: "item_1",
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(outbound.find((message) => message.method === "thread/started")).toMatchObject({
+      method: "thread/started",
+      params: {
+        thread: {
+          id: threadId,
+        },
+      },
+    });
+    expect(
+      outbound.find(
+        (message) =>
+          message.method === "turn/started" &&
+          isRecord(message.params) &&
+          message.params.turnId === undefined
+      )
+    ).toMatchObject({
+      method: "turn/started",
+      params: {
+        threadId,
+        turn: {
+          id: "turn_backend",
+        },
+      },
+    });
+    const serverRequest = outbound.find(
+      (message) =>
+        message.method === "item/tool/requestUserInput" &&
+        isRecord(message.params) &&
+        message.params.turnId === "turn_backend"
+    );
+    expect(serverRequest).toMatchObject({
+      method: "item/tool/requestUserInput",
+      params: {
+        threadId,
+        turnId: "turn_backend",
+      },
+    });
+
+    await connection.handleMessage({
+      id: String((serverRequest as { id: string }).id),
+      result: { answers: {} },
+    });
+
+    expect(backend.resolvedServerRequests).toContainEqual({
+      requestId: "backend-request-1",
+      response: { result: { answers: {} } },
+    });
+  });
+
+  it("does not synthesize user message items in turn/start responses", async () => {
+    const backend = createBackend();
+    const connection = new AppServerConnection({ backend });
+
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    const started = (await connection.handleMessage({
+      id: 2,
+      method: "thread/start",
+      params: {
+        cwd: "/repo",
+        experimentalRawEvents: false,
+        persistExtendedHistory: false,
+      },
+    })) as { result: { thread: { id: string } } };
+
+    await expect(
+      connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId: started.result.thread.id,
+          input: [{ type: "text", text: "hello", text_elements: [] }],
+        },
+      })
+    ).resolves.toMatchObject({
+      id: 3,
+      result: {
+        turn: {
+          items: [],
+        },
+      },
+    });
+  });
+
+  it("uses backend turn ids in turn/start responses for proxied backends", async () => {
+    const backend = new CodexProxyTestBackend();
+    const connection = new AppServerConnection({
+      backendRouter: new BackendRouter([backend]),
+    });
+
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    const started = (await connection.handleMessage({
+      id: 2,
+      method: "thread/start",
+      params: {
+        cwd: "/repo",
+        model: "codex::gpt-5.4-mini",
+        experimentalRawEvents: false,
+        persistExtendedHistory: false,
+      },
+    })) as { result: { thread: { id: string } } };
+
+    await expect(
+      connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId: started.result.thread.id,
+          input: [{ type: "text", text: "hello", text_elements: [] }],
+        },
+      })
+    ).resolves.toMatchObject({
+      id: 3,
+      result: {
+        turn: {
+          id: "turn_backend",
+          items: [],
+        },
+      },
+    });
+  });
+
+  it("routes raw-model ephemeral thread starts to the Codex backend", async () => {
+    const codexBackend = new CodexProxyTestBackend();
+    const connection = new AppServerConnection({
+      backendRouter: new BackendRouter([codexBackend]),
+    });
+
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    const response = (await connection.handleMessage({
+      id: 2,
+      method: "thread/start",
+      params: {
+        cwd: "/repo",
+        model: "gpt-5.1-codex-mini",
+        ephemeral: true,
+        experimentalRawEvents: false,
+        persistExtendedHistory: false,
+      },
+    })) as { result: { model: string; thread: { ephemeral: boolean } } };
+
+    expect(codexBackend.threadStartCalls).toContainEqual({
+      threadId: expect.any(String),
+      model: "gpt-5.1-codex-mini",
+    });
+    expect(response.result.model).toBe("codex::gpt-5.1-codex-mini");
+    expect(response.result.thread.ephemeral).toBe(true);
   });
 });

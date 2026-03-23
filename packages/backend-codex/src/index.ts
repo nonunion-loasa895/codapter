@@ -367,14 +367,17 @@ export class CodexBackend implements IBackend {
 
   async turnStart(input: BackendTurnStartInput): Promise<BackendTurnStartResult> {
     this.assertReady();
-    await this.sendRequest("turn/start", {
+    const response = (await this.sendRequest("turn/start", {
       threadId: input.threadHandle,
       input: input.input,
       cwd: input.cwd,
       model: input.model,
       effort: input.reasoningEffort,
-    });
-    return { accepted: true };
+    })) as { turn?: { id?: string | null } };
+    return {
+      accepted: true,
+      turnId: response.turn?.id ?? null,
+    };
   }
 
   async turnInterrupt(input: BackendTurnInterruptInput): Promise<void> {

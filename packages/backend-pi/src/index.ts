@@ -417,7 +417,10 @@ export class PiBackend implements IBackend {
 
     const normalized = normalizeTurnInput(input.input);
     await this.prompt(input.threadHandle, input.turnId, normalized.text, normalized.images);
-    return { accepted: true };
+    return {
+      accepted: true,
+      turnId: input.turnId,
+    };
   }
 
   async turnInterrupt(input: BackendTurnInterruptInput): Promise<void> {
