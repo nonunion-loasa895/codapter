@@ -2,6 +2,7 @@ import { stat, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { PassThrough, Readable } from "node:stream";
 import { createPiBackend } from "@codapter/backend-pi";
+import { BackendRouter } from "@codapter/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import {
@@ -65,7 +66,9 @@ function waitForWebSocketMessage(websocket: WebSocket): Promise<unknown> {
 async function startListeners(listenTargets: readonly string[]) {
   const backend = createPiBackend();
   await backend.initialize();
-  const listeners = await startAppServerListeners(listenTargets, { backend });
+  const listeners = await startAppServerListeners(listenTargets, {
+    backendRouter: new BackendRouter([backend]),
+  });
   return {
     listeners,
     async close() {
@@ -141,9 +144,11 @@ describe("parseListenTargets", () => {
     await backend.initialize();
 
     try {
-      await expect(startAppServerListeners(["ws://127.0.0.1:0/rpc"], { backend })).rejects.toThrow(
-        "Unsupported WebSocket path in listen target: ws://127.0.0.1:0/rpc"
-      );
+      await expect(
+        startAppServerListeners(["ws://127.0.0.1:0/rpc"], {
+          backendRouter: new BackendRouter([backend]),
+        })
+      ).rejects.toThrow("Unsupported WebSocket path in listen target: ws://127.0.0.1:0/rpc");
     } finally {
       await backend.dispose();
     }
@@ -429,9 +434,9 @@ describe("startAppServerListeners", () => {
     await backend.initialize();
 
     try {
-      await expect(startAppServerListeners(["stdio"], { backend })).rejects.toThrow(
-        "stdio listener requires stdin and stdout streams"
-      );
+      await expect(
+        startAppServerListeners(["stdio"], { backendRouter: new BackendRouter([backend]) })
+      ).rejects.toThrow("stdio listener requires stdin and stdout streams");
     } finally {
       await backend.dispose();
     }
@@ -444,9 +449,11 @@ describe("startAppServerListeners", () => {
     await backend.initialize();
 
     try {
-      await expect(startAppServerListeners([`unix://${socketPath}`], { backend })).rejects.toThrow(
-        `Refusing to replace non-socket path: ${socketPath}`
-      );
+      await expect(
+        startAppServerListeners([`unix://${socketPath}`], {
+          backendRouter: new BackendRouter([backend]),
+        })
+      ).rejects.toThrow(`Refusing to replace non-socket path: ${socketPath}`);
     } finally {
       await backend.dispose();
     }

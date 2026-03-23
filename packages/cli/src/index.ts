@@ -5,10 +5,11 @@ import { type IncomingMessage, type ServerResponse, createServer } from "node:ht
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
+import { createCodexBackend } from "@codapter/backend-codex";
 import { createPiBackend } from "@codapter/backend-pi";
 import {
   AppServerConnection,
-  type IBackend,
+  BackendRouter,
   failure,
   parseNdjsonLine,
   serializeNdjsonLine,
@@ -57,7 +58,7 @@ export interface ListenerSet {
 }
 
 export interface ListenerOptions {
-  readonly backend: IBackend;
+  readonly backendRouter: BackendRouter;
   readonly stdin?: NodeJS.ReadableStream;
   readonly stdout?: NodeJS.WritableStream;
   readonly collabEnabled?: boolean;
@@ -181,17 +182,51 @@ export async function runCli(
       piIdleTimeoutRaw && Number.isFinite(Number(piIdleTimeoutRaw))
         ? Number(piIdleTimeoutRaw)
         : undefined;
-    const backend = createPiBackend({
+    const piBackend = createPiBackend({
       ...(piCommand ? { command: piCommand } : {}),
       ...(piArgs ? { args: piArgs } : {}),
       ...(piIdleTimeoutMs !== undefined ? { idleTimeoutMs: piIdleTimeoutMs } : {}),
       ...(parsed.collabEnabled ? { collabExtensionPath: resolveCollabExtensionPath(env) } : {}),
     });
-    await backend.initialize();
+    await piBackend.initialize();
+
+    const codexBackends = [];
+    if (!envFlagEnabled(env.CODAPTER_CODEX_DISABLE)) {
+      const codexArgsRaw = env.CODAPTER_CODEX_ARGS;
+      let codexArgs: string[] | undefined;
+      if (codexArgsRaw) {
+        const parsedArgs = JSON.parse(codexArgsRaw);
+        if (!Array.isArray(parsedArgs)) {
+          throw new Error("CODAPTER_CODEX_ARGS must be a JSON array of strings");
+        }
+        codexArgs = parsedArgs;
+      }
+      const codexBackend = createCodexBackend({
+        ...(env.CODAPTER_CODEX_COMMAND ? { command: env.CODAPTER_CODEX_COMMAND } : {}),
+        ...(codexArgs ? { args: codexArgs } : {}),
+        ...(env.CODAPTER_CODEX_TRANSPORT === "websocket"
+          ? { transport: "websocket" as const }
+          : {}),
+        ...(env.CODAPTER_CODEX_WS_URL ? { websocketUrl: env.CODAPTER_CODEX_WS_URL } : {}),
+      });
+      codexBackends.push(codexBackend);
+      try {
+        await codexBackend.initialize();
+      } catch (error) {
+        stderr.write(
+          `[codapter] Codex backend unavailable: ${error instanceof Error ? error.message : String(error)}\n`
+        );
+      }
+    }
+
+    const backendRouter = new BackendRouter([piBackend, ...codexBackends]);
+    const initializedBackends = [piBackend, ...codexBackends];
 
     const signalCodes: Record<string, number> = { SIGINT: 130, SIGTERM: 143 };
     const cleanup = async (signal: string) => {
-      await backend.dispose();
+      await Promise.all(
+        initializedBackends.map(async (backend) => backend.dispose().catch(() => {}))
+      );
       process.exit(signalCodes[signal] ?? 1);
     };
     process.on("SIGINT", () => cleanup("SIGINT"));
@@ -199,12 +234,12 @@ export async function runCli(
 
     try {
       if (parsed.listenTargets.length === 0) {
-        await runStdioAppServer(stdin, stdout, backend, parsed.collabEnabled);
+        await runStdioAppServer(stdin, stdout, backendRouter, parsed.collabEnabled);
         return { exitCode: 0 };
       }
 
       const listeners = await startAppServerListeners(parsed.listenTargets, {
-        backend,
+        backendRouter,
         stdin,
         stdout,
         collabEnabled: parsed.collabEnabled,
@@ -219,7 +254,9 @@ export async function runCli(
 
       return { exitCode: 0 };
     } finally {
-      await backend.dispose();
+      await Promise.all(
+        initializedBackends.map(async (backend) => backend.dispose().catch(() => {}))
+      );
     }
   } catch (error) {
     stderr.write(`${error instanceof Error ? error.message : "Invalid CLI arguments"}\n`);
@@ -259,11 +296,11 @@ export async function startAppServerListeners(
 async function runStdioAppServer(
   stdin: NodeJS.ReadableStream,
   stdout: NodeJS.WritableStream,
-  backend: IBackend,
+  backendRouter: BackendRouter,
   collabEnabled = false
 ): Promise<void> {
   const connection = new AppServerConnection({
-    backend,
+    backendRouter,
     collabEnabled,
     onMessage(message) {
       stdout.write(serializeNdjsonLine(message));
@@ -303,7 +340,7 @@ function startStdioListener(
   options: ListenerOptions
 ): ListenerHandle {
   const connection = new AppServerConnection({
-    backend: options.backend,
+    backendRouter: options.backendRouter,
     collabEnabled: options.collabEnabled,
     onMessage(message) {
       stdout.write(serializeNdjsonLine(message));
@@ -444,7 +481,7 @@ function createRpcServer(options: ListenerOptions): {
 
   websocketServer.on("connection", (socket: WebSocket) => {
     const connection = new AppServerConnection({
-      backend: options.backend,
+      backendRouter: options.backendRouter,
       collabEnabled: options.collabEnabled,
       onMessage(message) {
         socket.send(JSON.stringify(message));
