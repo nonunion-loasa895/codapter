@@ -40,6 +40,7 @@ Deliverables:
 4. Remove hardcoded single-backend assumptions from core constructor wiring.
 5. Define race-safe backend event subscription semantics so no early backend events can be dropped.
 6. Define one router-owned aggregated default-model selection rule.
+7. Lock the concrete exported TypeScript signatures for `packages/core/src/backend.ts` and `packages/core/src/backend-router.ts` before Pi or Codex backend implementation begins.
 
 Acceptance criteria:
 
@@ -49,6 +50,7 @@ Acceptance criteria:
 4. Hardcoded `backendType: "pi"` writes are removed from generic core paths.
 5. The contract explicitly supports backend-originated `error` events in addition to notifications and server requests.
 6. The router exposes at most one aggregated `isDefault: true` model entry.
+7. `packages/core/src/backend.ts` and `packages/core/src/backend-router.ts` compile as the locked code-level source of truth for later phases.
 
 ### Phase 2: Pi Port To The New Contract
 
@@ -192,7 +194,8 @@ Phase start point:
 
 1. start at Phase 1 only,
 2. execute phases in strict order,
-3. do not skip ahead to Codex work before Pi has been ported to the new contract.
+3. do not skip ahead to Codex work before Pi has been ported to the new contract,
+4. within Phase 1, freeze the concrete backend and router signatures first before broader refactors continue.
 
 Boundaries and semantic-preservation constraints:
 

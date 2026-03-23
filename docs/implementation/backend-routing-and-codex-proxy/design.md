@@ -296,6 +296,13 @@ Where `BackendAppServerEvent` is no longer a Pi-shaped delta stream. It is a bac
 
 The key change is that the unit of orchestration becomes the backend-owned thread handle, not the backend-owned session plus local turn state machine.
 
+Implementation lock requirement:
+
+1. before Phase 2 or Phase 3 begins, this conceptual shape must be converted into concrete exported TypeScript signatures in `packages/core/src/backend.ts`,
+2. the paired routing API must be locked in `packages/core/src/backend-router.ts` at the same time,
+3. those concrete signatures become the code-level source of truth for the remaining execution phases,
+4. if implementation discovers a mismatch large enough to change these semantics, the design docs must be amended before proceeding.
+
 ### Thread handles
 
 Each backend returns an opaque thread handle that codapter persists in `ThreadRegistry.backendSessionId` for continuity with current storage naming. Semantically it now means:
