@@ -55,7 +55,7 @@ describe("gui audit smoke", () => {
       `[2026-03-24T01:00:00.000Z] GUI→CLI: ${JSON.stringify({
         id: 1,
         method: "thread/start",
-        params: { cwd: "/Users/kcassidy/codapter", model: "gpt-5.4-mini" },
+        params: { cwd: "/Users/kevin/codapter", model: "gpt-5.4-mini" },
       })}`,
       `[2026-03-24T01:00:00.100Z] CLI→GUI: ${JSON.stringify({
         id: 1,
@@ -126,7 +126,7 @@ describe("gui audit smoke", () => {
       `[2026-03-24T01:00:00.500Z] GUI→CLI: ${JSON.stringify({
         id: 3,
         method: "thread/start",
-        params: { cwd: "/Users/kcassidy/codapter", model: "gpt-5.1-codex-mini" },
+        params: { cwd: "/Users/kevin/codapter", model: "gpt-5.1-codex-mini" },
       })}`,
       `[2026-03-24T01:00:00.600Z] CLI→GUI: ${JSON.stringify({
         id: 3,
@@ -208,7 +208,7 @@ describe("gui audit smoke", () => {
       `[2026-03-24T01:00:00.000Z] GUI→CLI: ${JSON.stringify({
         id: 1,
         method: "thread/start",
-        params: { cwd: "/Users/kcassidy/codapter", model: "gpt-5.4-mini" },
+        params: { cwd: "/Users/kevin/codapter", model: "gpt-5.4-mini" },
       })}`,
       `[2026-03-24T01:00:00.100Z] CLI→GUI: ${JSON.stringify({
         id: 1,
@@ -233,7 +233,7 @@ describe("gui audit smoke", () => {
         type: "session_meta",
         payload: {
           id: "parent_backend",
-          cwd: "/Users/kcassidy/codapter",
+          cwd: "/Users/kevin/codapter",
           model_provider: "openai",
         },
       }),
@@ -289,7 +289,7 @@ describe("gui audit smoke", () => {
         type: "session_meta",
         payload: {
           id: "child_backend",
-          cwd: "/Users/kcassidy/codapter",
+          cwd: "/Users/kevin/codapter",
           model_provider: "openai",
           agent_nickname: "Volta",
           agent_role: "default",
@@ -310,7 +310,7 @@ describe("gui audit smoke", () => {
         payload: {
           type: "function_call",
           name: "exec_command",
-          arguments: '{"cmd":"date","workdir":"/Users/kcassidy/codapter"}',
+          arguments: '{"cmd":"date","workdir":"/Users/kevin/codapter"}',
           call_id: "call_exec",
         },
       }),
@@ -434,7 +434,7 @@ describe("gui audit smoke", () => {
       `[2026-03-24T01:00:00.000Z] GUI→CLI: ${JSON.stringify({
         id: 1,
         method: "thread/start",
-        params: { cwd: "/Users/kcassidy/codapter", model: "pi::anthropic/claude-opus-4-6" },
+        params: { cwd: "/Users/kevin/codapter", model: "pi::anthropic/claude-opus-4-6" },
       })}`,
       `[2026-03-24T01:00:00.100Z] CLI→GUI: ${JSON.stringify({
         id: 1,
@@ -609,7 +609,7 @@ describe("gui audit smoke", () => {
       `${`[2026-03-24T01:00:00.000Z] GUI→CLI: ${JSON.stringify({
         id: 1,
         method: "thread/start",
-        params: { cwd: "/Users/kcassidy/codapter", model: "gpt-5.4-mini" },
+        params: { cwd: "/Users/kevin/codapter", model: "gpt-5.4-mini" },
       })}`}\n`,
       "utf8"
     );
@@ -619,7 +619,7 @@ describe("gui audit smoke", () => {
         type: "session_meta",
         payload: {
           id: "child_backend",
-          cwd: "/Users/kcassidy/codapter",
+          cwd: "/Users/kevin/codapter",
           model_provider: "openai",
           agent_nickname: "Bohr",
           agent_role: "worker",
@@ -630,7 +630,7 @@ describe("gui audit smoke", () => {
         payload: {
           type: "function_call",
           name: "exec_command",
-          arguments: '{"cmd":"date","workdir":"/Users/kcassidy/codapter"}',
+          arguments: '{"cmd":"date","workdir":"/Users/kevin/codapter"}',
           call_id: "call_exec",
         },
       }),

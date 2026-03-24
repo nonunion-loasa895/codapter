@@ -328,7 +328,7 @@ describe("CollabManager", () => {
       type: "text_delta",
       sessionId: prompt?.sessionId ?? "",
       turnId: prompt?.turnId ?? "",
-      delta: "The output is:\n\n```\n/Users/kcassidy/codapter\n```",
+      delta: "The output is:\n\n```\n/Users/kevin/codapter\n```",
     });
     backend.emit(prompt?.sessionId ?? "", {
       type: "message_end",
@@ -347,7 +347,7 @@ describe("CollabManager", () => {
         [spawned.agent_id]: "completed",
       },
       messages: {
-        [spawned.agent_id]: "The output is:\n\n```\n/Users/kcassidy/codapter\n```",
+        [spawned.agent_id]: "The output is:\n\n```\n/Users/kevin/codapter\n```",
       },
       timed_out: false,
     });

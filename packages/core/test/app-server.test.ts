@@ -3906,7 +3906,7 @@ describe("AppServerConnection", () => {
           {
             id: "message-3",
             role: "assistant",
-            content: [{ type: "text", text: "/Users/kcassidy/codapter" }],
+            content: [{ type: "text", text: "/Users/kevin/codapter" }],
             createdAt: "2026-01-01T00:00:03.000Z",
           },
         ]);
@@ -3915,7 +3915,7 @@ describe("AppServerConnection", () => {
             type: "message_end",
             sessionId,
             turnId,
-            text: "/Users/kcassidy/codapter",
+            text: "/Users/kevin/codapter",
           });
         });
       }
@@ -4031,7 +4031,7 @@ describe("AppServerConnection", () => {
                   },
                   {
                     type: "agentMessage",
-                    text: "/Users/kcassidy/codapter",
+                    text: "/Users/kevin/codapter",
                   },
                 ],
               },

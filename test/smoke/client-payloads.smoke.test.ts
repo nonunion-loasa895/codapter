@@ -78,8 +78,8 @@ async function createMockPiTranscriptScript(
     "  const suffix = String(promptCounter);",
     "  const userMessage = { id: 'user-' + suffix, role: 'user', content: [{ type: 'text', text: message }], timestamp: Date.now() };",
     "  const toolCallMessage = { id: 'assistant-tool-' + suffix, role: 'assistant', content: [{ type: 'toolCall', id: 'tool-' + suffix, name: 'bash', arguments: { command: 'pwd' } }], stopReason: 'toolUse', timestamp: Date.now() };",
-    "  const toolResultMessage = { id: 'tool-result-' + suffix, role: 'toolResult', toolCallId: 'tool-' + suffix, toolName: 'bash', content: [{ type: 'text', text: '/Users/kcassidy/codapter\\n' }], isError: false, timestamp: Date.now() };",
-    "  const assistantMessage = { id: 'assistant-' + suffix, role: 'assistant', content: [{ type: 'text', text: 'The working directory is /Users/kcassidy/codapter.' }], stopReason: 'stop', timestamp: Date.now() };",
+    "  const toolResultMessage = { id: 'tool-result-' + suffix, role: 'toolResult', toolCallId: 'tool-' + suffix, toolName: 'bash', content: [{ type: 'text', text: '/Users/kevin/codapter\\n' }], isError: false, timestamp: Date.now() };",
+    "  const assistantMessage = { id: 'assistant-' + suffix, role: 'assistant', content: [{ type: 'text', text: 'The working directory is /Users/kevin/codapter.' }], stopReason: 'stop', timestamp: Date.now() };",
     "  state.history.push(userMessage, toolCallMessage, toolResultMessage, assistantMessage);",
     "  setTimeout(() => {",
     "    write({ type: 'turn_start' });",
@@ -88,13 +88,13 @@ async function createMockPiTranscriptScript(
     "    write({ type: 'message_start', message: toolCallMessage });",
     "    write({ type: 'message_end', message: toolCallMessage });",
     "    write({ type: 'tool_execution_start', toolCallId: 'tool-' + suffix, toolName: 'bash', args: { command: 'pwd' } });",
-    "    write({ type: 'tool_execution_end', toolCallId: 'tool-' + suffix, toolName: 'bash', result: { content: [{ type: 'text', text: '/Users/kcassidy/codapter\\n' }], details: { exitCode: 0 } }, isError: false });",
+    "    write({ type: 'tool_execution_end', toolCallId: 'tool-' + suffix, toolName: 'bash', result: { content: [{ type: 'text', text: '/Users/kevin/codapter\\n' }], details: { exitCode: 0 } }, isError: false });",
     "    write({ type: 'message_start', message: toolResultMessage });",
     "    write({ type: 'message_end', message: toolResultMessage });",
     "    write({ type: 'turn_end', message: toolCallMessage, toolResults: [toolResultMessage] });",
     "    write({ type: 'turn_start' });",
     "    write({ type: 'message_start', message: assistantMessage });",
-    "    write({ type: 'message_update', message: assistantMessage, assistantMessageEvent: { type: 'text_delta', delta: 'The working directory is /Users/kcassidy/codapter.' } });",
+    "    write({ type: 'message_update', message: assistantMessage, assistantMessageEvent: { type: 'text_delta', delta: 'The working directory is /Users/kevin/codapter.' } });",
     "    write({ type: 'message_end', message: assistantMessage });",
     "    write({ type: 'turn_end', message: assistantMessage, toolResults: [] });",
     "  }, 10);",
@@ -307,7 +307,7 @@ async function createMockCodexSubagentReadBackfillScript(rootDir: string): Promi
     "  }",
     "  if (payload.method === 'thread/read') {",
     "    if (payload.params.threadId === 'child_backend') {",
-    "      response(payload.id, { thread: { id: 'child_backend', path: childSessionPath, cwd: '/Users/kcassidy/codapter', turns: [], model: 'gpt-5.4-mini' }, reasoningEffort: 'medium' });",
+    "      response(payload.id, { thread: { id: 'child_backend', path: childSessionPath, cwd: '/Users/kevin/codapter', turns: [], model: 'gpt-5.4-mini' }, reasoningEffort: 'medium' });",
     "      return;",
     "    }",
     "    response(payload.id, { thread: { id: payload.params.threadId, path: parentSessionPath, turns: [], model: 'gpt-5.4-mini' }, reasoningEffort: 'medium' });",
@@ -365,7 +365,7 @@ describe("client payload smoke", () => {
         params: {
           experimentalRawEvents: false,
           persistExtendedHistory: false,
-          cwd: "/Users/kcassidy/codapter",
+          cwd: "/Users/kevin/codapter",
           modelProvider: "pi",
           model: "pi::anthropic/claude-opus-4-6",
         },
@@ -426,7 +426,7 @@ describe("client payload smoke", () => {
         .filter((item) => item.type === "agentMessage")
         .map((item) => item.text ?? "");
       expect(resumedAgentMessages.join("\n")).toContain(
-        "The working directory is /Users/kcassidy/codapter."
+        "The working directory is /Users/kevin/codapter."
       );
       expect(JSON.stringify(resumedTurn)).not.toContain('"role":"toolResult"');
       expect(JSON.stringify(resumedTurn)).not.toContain('"type":"toolCall"');
@@ -461,7 +461,7 @@ describe("client payload smoke", () => {
         params: {
           experimentalRawEvents: false,
           persistExtendedHistory: false,
-          cwd: "/Users/kcassidy/codapter",
+          cwd: "/Users/kevin/codapter",
           modelProvider: "pi",
           model: "pi::anthropic/claude-opus-4-6",
         },
@@ -538,7 +538,7 @@ describe("client payload smoke", () => {
         params: {
           experimentalRawEvents: false,
           persistExtendedHistory: false,
-          cwd: "/Users/kcassidy/codapter",
+          cwd: "/Users/kevin/codapter",
           modelProvider: "codex",
           model: "gpt-5.4-mini",
         },
@@ -668,7 +668,7 @@ describe("client payload smoke", () => {
         params: {
           experimentalRawEvents: false,
           persistExtendedHistory: false,
-          cwd: "/Users/kcassidy/codapter",
+          cwd: "/Users/kevin/codapter",
           modelProvider: "codex",
           model: "gpt-5.4-mini",
         },
