@@ -9,7 +9,7 @@ const INTERNAL_TITLE_THREAD_PROMPT =
 
 async function runNodeScript(args: readonly string[], cwd: string): Promise<string> {
   return await new Promise((resolve, reject) => {
-    const child = spawn("node", args, {
+    const child = spawn(process.execPath, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -37,6 +37,7 @@ async function runNodeScript(args: readonly string[], cwd: string): Promise<stri
 
 describe("gui audit smoke", () => {
   const directories: string[] = [];
+  const repoRoot = process.cwd();
 
   afterEach(async () => {
     for (const directory of directories) {
@@ -175,7 +176,7 @@ describe("gui audit smoke", () => {
         "--stdio-log",
         stdioLogPath,
       ],
-      "/Users/kcassidy/codapter"
+      repoRoot
     );
 
     const summary = JSON.parse(await readFile(join(summaryDir, "summary.json"), "utf8"));
@@ -356,7 +357,7 @@ describe("gui audit smoke", () => {
         "--session-log",
         childSessionPath,
       ],
-      "/Users/kcassidy/codapter"
+      repoRoot
     );
 
     const summary = JSON.parse(await readFile(join(summaryDir, "summary.json"), "utf8"));
@@ -571,7 +572,7 @@ describe("gui audit smoke", () => {
         "--stdio-log",
         stdioLogPath,
       ],
-      "/Users/kcassidy/codapter"
+      repoRoot
     );
 
     const summary = JSON.parse(await readFile(join(summaryDir, "summary.json"), "utf8"));
@@ -658,7 +659,7 @@ describe("gui audit smoke", () => {
         "--session-log",
         childSessionPath,
       ],
-      "/Users/kcassidy/codapter"
+      repoRoot
     );
 
     const summary = JSON.parse(await readFile(join(summaryDir, "summary.json"), "utf8"));

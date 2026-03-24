@@ -2743,7 +2743,12 @@ export class AppServerConnection {
       };
     }
 
-    const name = backendTitle ?? entry.name;
+    const name =
+      backendTitle ??
+      entry.name ??
+      (preserveExistingSubAgentIdentity && typeof agentNickname === "string"
+        ? agentNickname
+        : null);
 
     if (
       path === entry.path &&

@@ -6193,7 +6193,7 @@ describe("AppServerConnection", () => {
             path: childSessionPath,
             agentNickname: "Euler",
             agentRole: "default",
-            name: null,
+            name: "Euler",
             source: {
               subAgent: {
                 thread_spawn: {
@@ -6327,7 +6327,7 @@ describe("AppServerConnection", () => {
             id: childThreadId,
             agentNickname: "Ptolemy",
             agentRole: "default",
-            name: null,
+            name: "Ptolemy",
             source: {
               subAgent: {
                 thread_spawn: {
