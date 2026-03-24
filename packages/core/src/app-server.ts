@@ -2674,12 +2674,7 @@ export class AppServerConnection {
       };
     }
 
-    const name =
-      backendName ??
-      (agentNickname &&
-      (entry.name === null || entry.name === entry.preview || entry.name === entry.agentNickname)
-        ? agentNickname
-        : entry.name);
+    const name = backendName ?? entry.name;
 
     if (
       path === entry.path &&
@@ -2748,12 +2743,7 @@ export class AppServerConnection {
       };
     }
 
-    const name =
-      backendTitle ??
-      (agentNickname &&
-      (entry.name === null || entry.name === entry.preview || entry.name === entry.agentNickname)
-        ? agentNickname
-        : entry.name);
+    const name = backendTitle ?? entry.name;
 
     if (
       path === entry.path &&
@@ -2829,7 +2819,7 @@ export class AppServerConnection {
         model,
         modelProvider: parentEntry.backendType,
         reasoningEffort,
-        name: nickname ?? prompt.slice(0, 120),
+        name: null,
         source: {
           subAgent: {
             thread_spawn: {
@@ -3174,7 +3164,7 @@ export class AppServerConnection {
       model: input.model,
       modelProvider: input.backendType,
       reasoningEffort: input.reasoningEffort,
-      name: input.nickname ?? input.preview,
+      name: null,
       source: {
         subAgent: {
           thread_spawn: {

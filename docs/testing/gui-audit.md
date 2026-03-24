@@ -342,8 +342,9 @@ Expected:
 
 1. A child thread appears in the GUI.
 2. The parent shows the collab tool-call item rather than raw tool spam.
-3. The child produces an answer in its own thread.
-4. Returning to the parent shows the summary after the child completes.
+3. Opening the child shows a generated task title on the left and the colored agent nickname on the right.
+4. The child produces an answer in its own thread.
+5. Returning to the parent shows the summary after the child completes.
 
 Then validate:
 
@@ -378,8 +379,9 @@ Expected:
 
 1. The child appears nested under the parent in the sidebar.
 2. The child label uses the nickname, not the backend handle.
-3. Opening the child shows the child prompt and child result only.
-4. The parent keeps the `Spawning 1 agent`, `Created <nickname>`, and completion summary items.
+3. Opening the child shows a generated task title on the left and the colored agent nickname on the right.
+4. Opening the child shows the child prompt and child result only.
+5. The parent keeps the `Spawning 1 agent`, `Created <nickname>`, and completion summary items.
 
 ### RC3. Routed child follow-up lifecycle
 

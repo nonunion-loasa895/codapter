@@ -2141,6 +2141,7 @@ describe("AppServerConnection", () => {
         params: {
           thread: {
             id: expect.any(String),
+            name: null,
             preview: "review this",
             source: {
               subAgent: {
@@ -5811,7 +5812,7 @@ describe("AppServerConnection", () => {
       expect(childThreadId).toBeTruthy();
       expect(childThreadId).not.toBe("child_backend_handle");
       expect(childStarted?.params.thread.agentNickname).toBe("Ptolemy");
-      expect(childStarted?.params.thread.name).toBe("Ptolemy");
+      expect(childStarted?.params.thread.name).toBeNull();
 
       const completed = outbound.find(
         (message) =>
@@ -6192,7 +6193,7 @@ describe("AppServerConnection", () => {
             path: childSessionPath,
             agentNickname: "Euler",
             agentRole: "default",
-            name: "Euler",
+            name: null,
             source: {
               subAgent: {
                 thread_spawn: {
@@ -6326,7 +6327,7 @@ describe("AppServerConnection", () => {
             id: childThreadId,
             agentNickname: "Ptolemy",
             agentRole: "default",
-            name: "Ptolemy",
+            name: null,
             source: {
               subAgent: {
                 thread_spawn: {
@@ -6438,7 +6439,7 @@ describe("AppServerConnection", () => {
       const childThreadId = childStarted?.params.thread.id ?? "";
       expect(childThreadId).toBeTruthy();
       expect(childStarted?.params.thread.agentNickname).toBe("Ptolemy");
-      expect(childStarted?.params.thread.name).toBe("Ptolemy");
+      expect(childStarted?.params.thread.name).toBeNull();
 
       backend.threadReadOverrides.set("child_backend_handle", {
         title: "Check system date",
