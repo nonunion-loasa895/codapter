@@ -182,11 +182,13 @@ export async function runCli(
       piIdleTimeoutRaw && Number.isFinite(Number(piIdleTimeoutRaw))
         ? Number(piIdleTimeoutRaw)
         : undefined;
+    const piStaticModelsPath = env.CODAPTER_PI_STATIC_MODELS_FILE?.trim() || undefined;
     const piBackend = createPiBackend({
       ...(piCommand ? { command: piCommand } : {}),
       ...(piArgs ? { args: piArgs } : {}),
       ...(piIdleTimeoutMs !== undefined ? { idleTimeoutMs: piIdleTimeoutMs } : {}),
       ...(parsed.collabEnabled ? { collabExtensionPath: resolveCollabExtensionPath(env) } : {}),
+      ...(piStaticModelsPath ? { staticAvailableModelsPath: piStaticModelsPath } : {}),
     });
     await piBackend.initialize();
 

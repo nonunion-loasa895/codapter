@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -50,6 +51,7 @@ export interface PiBackendOptions {
   readonly debugLogFilePath?: string | null;
   readonly idleTimeoutMs?: number;
   readonly collabExtensionPath?: string | null;
+  readonly staticAvailableModelsPath?: string | null;
 }
 
 interface ManagedSession {
@@ -417,6 +419,7 @@ export class PiBackend implements IBackend {
   private disposed = false;
   private capabilities: BackendCapabilities | null = null;
   private readonly collabExtensionPath: string | null;
+  private readonly staticAvailableModelsPath: string | null;
 
   constructor(options: PiBackendOptions = {}) {
     this.sessionDir = options.sessionDir ?? defaultSessionDir();
@@ -447,6 +450,7 @@ export class PiBackend implements IBackend {
     this.launchOptions = launchOptions;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 300_000;
     this.collabExtensionPath = options.collabExtensionPath ?? null;
+    this.staticAvailableModelsPath = options.staticAvailableModelsPath ?? null;
     this.stateStore = new PiBackendStateStore(this.sessionDir);
   }
 
@@ -767,6 +771,15 @@ export class PiBackend implements IBackend {
       return cloneModels([...this.modelCache.values()]);
     }
 
+    if (this.staticAvailableModelsPath) {
+      const summaries = await this.loadStaticModels(this.staticAvailableModelsPath);
+      this.modelCache.clear();
+      for (const model of summaries) {
+        this.modelCache.set(model.id, model);
+      }
+      return cloneModels(summaries);
+    }
+
     const probe = this.createProcess(`models:${randomUUID()}`);
     try {
       const models = await probe.getAvailableModels();
@@ -1046,6 +1059,17 @@ export class PiBackend implements IBackend {
       provider,
       modelId: rawModelId,
     };
+  }
+
+  private async loadStaticModels(filePath: string): Promise<BackendModelSummary[]> {
+    const raw = await readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    const models = Array.isArray(parsed)
+      ? parsed
+      : isRecord(parsed) && Array.isArray(parsed.models)
+        ? parsed.models
+        : [];
+    return mapAvailableModelsToSummaries(models);
   }
 }
 

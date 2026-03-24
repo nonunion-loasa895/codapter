@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -607,6 +607,50 @@ describe("PiBackend", () => {
     const resumedHistory = await reopened.readSessionHistory(threadHandle);
     expect(resumedHistory).toEqual(expect.any(Array));
     await reopened.dispose();
+  });
+
+  it("loads static available models from a file without starting the Pi process", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "codapter-backend-pi-static-"));
+    const sessionDir = join(rootDir, "sessions");
+    const staticModelsPath = join(rootDir, "models.json");
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(
+      staticModelsPath,
+      JSON.stringify({
+        models: [
+          {
+            provider: "anthropic",
+            id: "claude-opus-4-6",
+            name: "Claude Opus 4.6",
+            reasoning: true,
+            input: ["text", "image"],
+            contextWindow: 1000000,
+          },
+        ],
+      }),
+      "utf8"
+    );
+
+    const backend = createPiBackend({
+      sessionDir,
+      command: "definitely-not-a-real-command",
+      staticAvailableModelsPath: staticModelsPath,
+    });
+
+    try {
+      await backend.initialize();
+      await expect(backend.listModels()).resolves.toEqual([
+        expect.objectContaining({
+          id: "anthropic/claude-opus-4-6",
+          model: "anthropic/claude-opus-4-6",
+          displayName: "Claude Opus 4.6",
+          defaultReasoningEffort: "medium",
+        }),
+      ]);
+    } finally {
+      await backend.dispose();
+      await rm(rootDir, { recursive: true, force: true });
+    }
   });
 
   it("passes collab launch config and extension path to child processes", async () => {
