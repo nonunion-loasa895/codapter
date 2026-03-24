@@ -2656,6 +2656,10 @@ export class AppServerConnection {
     const sessionMetadata = this.readNativeSubAgentSessionMetadata(path);
     const agentNickname = sessionMetadata?.agentNickname ?? entry.agentNickname;
     const agentRole = sessionMetadata?.agentRole ?? entry.agentRole;
+    const backendName =
+      typeof backendThread.name === "string" && backendThread.name.trim().length > 0
+        ? backendThread.name.trim()
+        : null;
 
     let source = entry.source;
     if (isSubAgentThreadSource(entry.source)) {
@@ -2670,11 +2674,19 @@ export class AppServerConnection {
       };
     }
 
+    const name =
+      backendName ??
+      (agentNickname &&
+      (entry.name === null || entry.name === entry.preview || entry.name === entry.agentNickname)
+        ? agentNickname
+        : entry.name);
+
     if (
       path === entry.path &&
       cwd === entry.cwd &&
       agentNickname === entry.agentNickname &&
       agentRole === entry.agentRole &&
+      name === entry.name &&
       source === entry.source
     ) {
       return null;
@@ -2686,6 +2698,7 @@ export class AppServerConnection {
       source,
       agentNickname,
       agentRole,
+      name,
     });
     return this.buildThread(updated, []);
   }
@@ -2717,6 +2730,10 @@ export class AppServerConnection {
       (readAgentNickname === undefined ? entry.agentNickname : readAgentNickname);
     const agentRole =
       sessionMetadata?.agentRole ?? (readAgentRole === undefined ? entry.agentRole : readAgentRole);
+    const backendTitle =
+      typeof readResult.title === "string" && readResult.title.trim().length > 0
+        ? readResult.title.trim()
+        : null;
 
     let source = entry.source;
     if (isSubAgentThreadSource(entry.source)) {
@@ -2732,10 +2749,11 @@ export class AppServerConnection {
     }
 
     const name =
-      agentNickname &&
+      backendTitle ??
+      (agentNickname &&
       (entry.name === null || entry.name === entry.preview || entry.name === entry.agentNickname)
         ? agentNickname
-        : entry.name;
+        : entry.name);
 
     if (
       path === entry.path &&
