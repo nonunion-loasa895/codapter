@@ -473,6 +473,13 @@ describe("gui audit smoke", () => {
           },
         },
       })}`,
+      `[2026-03-24T01:00:00.250Z] CLI→GUI: ${JSON.stringify({
+        method: "thread/name/updated",
+        params: {
+          threadId: "child-thread",
+          threadName: "Execute date command",
+        },
+      })}`,
       `[2026-03-24T01:00:00.300Z] CLI→GUI: ${JSON.stringify({
         method: "item/completed",
         params: {
@@ -578,7 +585,7 @@ describe("gui audit smoke", () => {
       },
       children: [
         {
-          displayName: "Robie",
+          displayName: "Execute date command",
           preview: "Run date",
           userMessageCount: 1,
           commandExecutionCount: 1,

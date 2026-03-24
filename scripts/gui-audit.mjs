@@ -469,6 +469,12 @@ function summarizeNotification(method, params, normalize) {
         threadId: normalize(params?.threadId ?? null),
         status: normalize(params?.status ?? null),
       };
+    case "thread/name/updated":
+      return {
+        method,
+        threadId: normalize(params?.threadId ?? null),
+        threadName: normalize(params?.threadName ?? null),
+      };
     case "turn/started":
     case "turn/completed":
       return {
@@ -735,6 +741,16 @@ function buildVisibleFlow(focusSummary) {
 
   for (const notification of notifications) {
     if (!isRecord(notification)) {
+      continue;
+    }
+
+    if (
+      notification.method === "thread/name/updated" &&
+      typeof notification.threadId === "string" &&
+      typeof notification.threadName === "string" &&
+      children.has(notification.threadId)
+    ) {
+      ensureChild(notification.threadId).displayName = notification.threadName;
       continue;
     }
 
