@@ -397,6 +397,66 @@ function mapHistoryToTurns(history: readonly BackendMessage[]) {
   return turns;
 }
 
+function userMessageContentFromTurn(turn: {
+  readonly items?: readonly Record<string, unknown>[];
+}): unknown[] | null {
+  const item = turn.items?.find((entry) => entry.type === "userMessage");
+  if (!item || !Array.isArray(item.content)) {
+    return null;
+  }
+  return item.content;
+}
+
+function historyTailDuplicatesLiveTurn(
+  turns: readonly {
+    readonly items: readonly Record<string, unknown>[];
+    readonly status: string;
+  }[],
+  liveTurn: {
+    readonly items?: readonly Record<string, unknown>[];
+    readonly status?: string;
+  }
+): boolean {
+  if (liveTurn.status !== "inProgress") {
+    return false;
+  }
+
+  const trailingTurn = turns.at(-1);
+  if (!trailingTurn || trailingTurn.status !== "completed") {
+    return false;
+  }
+
+  if (trailingTurn.items.some((item) => item.type !== "userMessage")) {
+    return false;
+  }
+
+  const trailingUserContent = userMessageContentFromTurn(trailingTurn);
+  const liveUserContent = userMessageContentFromTurn(liveTurn);
+  if (!trailingUserContent || !liveUserContent) {
+    return false;
+  }
+
+  return JSON.stringify(trailingUserContent) === JSON.stringify(liveUserContent);
+}
+
+function mergeHistoryTurnsWithLiveTurn(
+  turns: Array<{
+    id: string;
+    items: Array<Record<string, unknown>>;
+    status: "completed";
+    error: null;
+  }>,
+  liveTurn: {
+    readonly items?: readonly Record<string, unknown>[];
+    readonly status?: string;
+  }
+): typeof turns {
+  if (historyTailDuplicatesLiveTurn(turns, liveTurn)) {
+    return turns.slice(0, -1);
+  }
+  return turns;
+}
+
 export class PiBackend implements IBackend {
   public readonly backendType = "pi";
   public readonly sessionDir: string;
@@ -541,11 +601,18 @@ export class PiBackend implements IBackend {
   }
 
   async threadRead(input: BackendThreadReadInput): Promise<BackendThreadReadResult> {
-    const turns = input.includeTurns
+    let turns = input.includeTurns
       ? mapHistoryToTurns(await this.readSessionHistory(input.threadHandle))
       : [];
     const runtime = this.threadRuntimes.get(input.threadHandle);
     if (input.includeTurns && runtime?.machine) {
+      turns = mergeHistoryTurnsWithLiveTurn(
+        turns,
+        runtime.machine.snapshot as unknown as {
+          readonly items?: readonly Record<string, unknown>[];
+          readonly status?: string;
+        }
+      );
       turns.push(runtime.machine.snapshot as unknown as (typeof turns)[number]);
     }
     const record = await this.requireRecord(input.threadHandle);

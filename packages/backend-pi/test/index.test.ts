@@ -707,6 +707,68 @@ describe("PiBackend", () => {
     }
   });
 
+  it("dedupes the active child prompt when threadRead resumes before completion", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "codapter-backend-pi-live-read-"));
+    const sessionDir = join(rootDir, "sessions");
+    await mkdir(sessionDir, { recursive: true });
+    const scriptPath = await createMockPiScript(rootDir);
+
+    const backend = createPiBackend({
+      sessionDir,
+      command: process.execPath,
+      args: [scriptPath, sessionDir],
+    });
+
+    try {
+      await backend.initialize();
+      const started = await backend.threadStart({
+        threadId: "thread-live-read",
+        cwd: sessionDir,
+        model: "anthropic/claude-opus-4-6",
+        reasoningEffort: "medium",
+      });
+
+      await backend.turnStart({
+        threadId: "thread-live-read",
+        threadHandle: started.threadHandle,
+        turnId: "turn-live-read",
+        cwd: sessionDir,
+        input: [
+          {
+            type: "text",
+            text: "Run the `date` command and report the output.",
+            text_elements: [],
+          },
+        ],
+        model: null,
+        reasoningEffort: null,
+      });
+
+      const threadRead = await backend.threadRead({
+        threadId: "thread-live-read",
+        threadHandle: started.threadHandle,
+        includeTurns: true,
+        cwd: sessionDir,
+      });
+
+      expect(threadRead.turns).toHaveLength(1);
+      expect(
+        threadRead.turns[0]?.items.filter(
+          (item) =>
+            item.type === "userMessage" &&
+            JSON.stringify(item.content) ===
+              JSON.stringify([
+                { type: "text", text: "Run the `date` command and report the output." },
+              ])
+        )
+      ).toHaveLength(1);
+      expect(threadRead.turns[0]?.status).toBe("inProgress");
+    } finally {
+      await backend.dispose();
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
   it("dedupes concurrent available-model probes into a single Pi process launch", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "codapter-backend-pi-model-dedupe-"));
     const sessionDir = join(rootDir, "sessions");
