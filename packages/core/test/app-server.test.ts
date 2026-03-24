@@ -1426,6 +1426,97 @@ describe("AppServerConnection", () => {
     });
   });
 
+  it("logs per-backend model/list diagnostics", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-model-list-log-"));
+    const logFilePath = join(directory, "debug.jsonl");
+    const piBackend = new TestBackend(undefined, {
+      backendType: "pi",
+      models: [
+        {
+          id: "model_1",
+          model: "openai-codex/gpt-5.4",
+          displayName: "GPT-5.4",
+          description: "Pi model",
+          hidden: false,
+          isDefault: true,
+          inputModalities: ["text"],
+          supportedReasoningEfforts: [
+            {
+              reasoningEffort: "medium",
+              description: "Balanced reasoning",
+            },
+          ],
+          defaultReasoningEffort: "medium",
+          supportsPersonality: true,
+        },
+      ],
+    });
+    const codexBackend = new TestBackend(undefined, {
+      backendType: "codex",
+      models: [],
+    });
+    const originalPiListModels = piBackend.listModels.bind(piBackend);
+    vi.spyOn(piBackend, "listModels").mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      return await originalPiListModels();
+    });
+    vi.spyOn(codexBackend, "listModels").mockRejectedValue(new Error("codex offline"));
+
+    const connection = new AppServerConnection({
+      backendRouter: new BackendRouter([piBackend, codexBackend]),
+      debugLogFilePath: logFilePath,
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      await connection.handleMessage({
+        id: 2,
+        method: "model/list",
+        params: {},
+      });
+      await connection.dispose();
+
+      const logLines = (await readFile(logFilePath, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const entry = logLines.find(
+        (line) => line.kind === "backend-event" && line.method === "model/list"
+      );
+
+      expect(entry).toMatchObject({
+        durationMs: expect.any(Number),
+      });
+      expect(entry?.diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            backendType: "pi",
+            status: "ok",
+            modelCount: 1,
+            error: null,
+          }),
+          expect.objectContaining({
+            backendType: "codex",
+            status: "error",
+            modelCount: 0,
+            error: "codex offline",
+          }),
+        ])
+      );
+      expect((entry?.durationMs as number) >= 15).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("lists raw Codex model ids and prefixed Pi model ids", async () => {
     const piBackend = new TestBackend(undefined, {
       backendType: "pi",

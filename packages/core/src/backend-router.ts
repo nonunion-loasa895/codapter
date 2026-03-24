@@ -40,6 +40,20 @@ export interface RoutedBackendSelection {
   readonly selection: ParsedBackendSelection;
 }
 
+export interface BackendModelListDiagnostic {
+  readonly backendType: string;
+  readonly status: "ok" | "skipped" | "error";
+  readonly durationMs: number;
+  readonly modelCount: number;
+  readonly error: string | null;
+}
+
+export interface BackendModelListResult {
+  readonly models: BackendModelSummary[];
+  readonly diagnostics: BackendModelListDiagnostic[];
+  readonly totalDurationMs: number;
+}
+
 export class BackendRouter {
   private readonly backends = new Map<string, IBackend>();
   private readonly backendOrder: string[] = [];
@@ -128,20 +142,54 @@ export class BackendRouter {
     return this.toClientModelId(parsed.selection.backendType, parsed.selection.rawModelId);
   }
 
-  async listModels(): Promise<BackendModelSummary[]> {
+  async listModelsDetailed(): Promise<BackendModelListResult> {
+    const startedAt = Date.now();
     const candidates: AggregatedModelEntry[] = [];
+    const diagnostics: BackendModelListDiagnostic[] = [];
 
     for (const backendType of this.backendOrder) {
       const backend = this.backends.get(backendType);
-      if (!backend || !backend.isAlive()) {
+      if (!backend) {
+        diagnostics.push({
+          backendType,
+          status: "skipped",
+          durationMs: 0,
+          modelCount: 0,
+          error: "Backend not registered",
+        });
         continue;
       }
+      if (!backend.isAlive()) {
+        diagnostics.push({
+          backendType,
+          status: "skipped",
+          durationMs: 0,
+          modelCount: 0,
+          error: "Backend unavailable",
+        });
+        continue;
+      }
+      const backendStartedAt = Date.now();
       let models: readonly BackendModelSummary[];
       try {
         models = await backend.listModels();
-      } catch {
+      } catch (error) {
+        diagnostics.push({
+          backendType,
+          status: "error",
+          durationMs: Date.now() - backendStartedAt,
+          modelCount: 0,
+          error: error instanceof Error ? error.message : String(error),
+        });
         continue;
       }
+      diagnostics.push({
+        backendType,
+        status: "ok",
+        durationMs: Date.now() - backendStartedAt,
+        modelCount: models.length,
+        error: null,
+      });
       for (const model of models) {
         candidates.push(toAggregatedModel(backend.backendType, model));
       }
@@ -153,10 +201,18 @@ export class BackendRouter {
       null;
     const defaultId = preferredDefault?.id ?? null;
 
-    return candidates.map((model) => ({
-      ...model,
-      isDefault: defaultId !== null && model.id === defaultId,
-    }));
+    return {
+      models: candidates.map((model) => ({
+        ...model,
+        isDefault: defaultId !== null && model.id === defaultId,
+      })),
+      diagnostics,
+      totalDurationMs: Date.now() - startedAt,
+    };
+  }
+
+  async listModels(): Promise<BackendModelSummary[]> {
+    return (await this.listModelsDetailed()).models;
   }
 
   async resolveModelSelection(model: string | null | undefined): Promise<RoutedBackendSelection> {

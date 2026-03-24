@@ -400,6 +400,8 @@ interface DebugLogRecord {
   readonly method?: string;
   readonly eventType?: string;
   readonly payload?: unknown;
+  readonly diagnostics?: unknown;
+  readonly durationMs?: number;
 }
 
 class DebugLogWriter {
@@ -1199,7 +1201,7 @@ export class AppServerConnection {
   }
 
   private async handleModelList(): Promise<ModelListResponse> {
-    const models = await this.backendRouter.listModels();
+    const { models, diagnostics, totalDurationMs } = await this.backendRouter.listModelsDetailed();
 
     const response: ModelListResponse = {
       data: models.map((model) => ({
@@ -1226,6 +1228,8 @@ export class AppServerConnection {
       kind: "backend-event",
       method: "model/list",
       payload: response,
+      diagnostics,
+      durationMs: totalDurationMs,
     });
 
     return response;
