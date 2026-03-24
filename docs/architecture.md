@@ -77,6 +77,6 @@ With collaboration enabled, `CollabManager` routes child-agent operations (`spaw
 ## Current Limitations
 
 - Codex websocket transport is deferred.
-- Codex-to-Pi sub-agent spawning is not implemented.
+- Pi-backed threads can spawn Codex sub-agents, but Codex-backed threads cannot spawn Pi sub-agents.
 - `command/exec` PTY mode is not implemented (`tty: true` rejected).
 - MCP server elicitation remains unsupported.

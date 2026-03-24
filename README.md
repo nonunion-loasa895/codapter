@@ -455,6 +455,7 @@ CODEX_SPARKLE_ENABLED=false /Applications/Codex.app/Contents/MacOS/Codex
 - **Collab requires adapter support**: collab/sub-agent workflows require starting codapter with `--collab` or `CODAPTER_COLLAB=1`
 - **No MCP tools**: MCP server integration is not available through Pi
 - **No realtime/voice**: Pi has no voice API
+- **Cross-backend sub-agents are one-way**: Pi-backed threads can spawn Codex sub-agents, but Codex-backed threads cannot spawn Pi sub-agents
 - **Codex websocket transport deferred**: `CODAPTER_CODEX_TRANSPORT=websocket` returns a deterministic deferred error in this topic
 - **No worktree management**: Git worktree RPCs return method-not-found (planned as future adapter-native feature)
 - **No PTY mode**: `command/exec` with `tty: true` is rejected

@@ -89,4 +89,4 @@ Codapter routes thread and turn operations through `BackendRouter` into register
 - Pi-backed elicitation is supported through `item/tool/requestUserInput`. MCP server elicitation is still unsupported.
 - Remote tunnel orchestration is not automated by codapter. Use your own SSH or port-forward setup if you want to connect to a WebSocket listener remotely.
 - Codex websocket transport is deferred in this topic and currently returns a deterministic reject path.
-- Codex-to-Pi sub-agent spawning is not implemented.
+- Pi-backed threads can spawn Codex sub-agents, but Codex-backed threads cannot spawn Pi sub-agents.
