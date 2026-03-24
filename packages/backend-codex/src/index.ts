@@ -77,6 +77,17 @@ function rawModelId(value: string): string {
   return parsed?.rawModelId ?? value;
 }
 
+function mergeConfig(
+  config: Record<string, unknown> | null | undefined,
+  reasoningEffort: string | null | undefined
+): Record<string, unknown> | null {
+  const merged = config ? { ...config } : {};
+  if (reasoningEffort) {
+    merged.model_reasoning_effort = reasoningEffort;
+  }
+  return Object.keys(merged).length > 0 ? merged : null;
+}
+
 function inferThreadHandle(method: string, params: unknown): string | null {
   if (isRecord(params) && typeof params.threadId === "string" && params.threadId.length > 0) {
     return params.threadId;
@@ -277,9 +288,18 @@ export class CodexBackend implements IBackend {
     const response = (await this.sendRequest("thread/start", {
       model: input.model,
       cwd: input.cwd,
-      config: input.reasoningEffort ? { model_reasoning_effort: input.reasoningEffort } : null,
-      experimentalRawEvents: false,
-      persistExtendedHistory: false,
+      approvalPolicy: input.approvalPolicy ?? null,
+      approvalsReviewer: input.approvalsReviewer ?? null,
+      sandbox: input.sandbox ?? null,
+      config: mergeConfig(input.config ?? null, input.reasoningEffort),
+      serviceTier: input.serviceTier ?? null,
+      serviceName: input.serviceName ?? null,
+      baseInstructions: input.baseInstructions ?? null,
+      developerInstructions: input.developerInstructions ?? null,
+      personality: input.personality ?? null,
+      ephemeral: input.ephemeral ?? null,
+      experimentalRawEvents: input.experimentalRawEvents ?? false,
+      persistExtendedHistory: input.persistExtendedHistory ?? false,
     })) as { thread?: { id?: string; path?: string | null }; reasoningEffort?: string | null };
     const threadHandle = response.thread?.id;
     if (!threadHandle) {
@@ -300,8 +320,16 @@ export class CodexBackend implements IBackend {
       threadId: input.threadHandle,
       cwd: input.cwd,
       model: input.model,
-      config: input.reasoningEffort ? { model_reasoning_effort: input.reasoningEffort } : null,
-      persistExtendedHistory: false,
+      approvalPolicy: input.approvalPolicy ?? null,
+      approvalsReviewer: input.approvalsReviewer ?? null,
+      sandbox: input.sandbox ?? null,
+      config: mergeConfig(input.config ?? null, input.reasoningEffort),
+      serviceTier: input.serviceTier ?? null,
+      serviceName: input.serviceName ?? null,
+      baseInstructions: input.baseInstructions ?? null,
+      developerInstructions: input.developerInstructions ?? null,
+      personality: input.personality ?? null,
+      persistExtendedHistory: input.persistExtendedHistory ?? false,
     })) as { thread?: { id?: string; path?: string | null }; reasoningEffort?: string | null };
     const threadHandle = response.thread?.id ?? input.threadHandle;
     this.knownThreadHandles.add(threadHandle);
@@ -319,9 +347,16 @@ export class CodexBackend implements IBackend {
       threadId: input.sourceThreadHandle,
       cwd: input.cwd,
       model: input.model,
-      config: input.reasoningEffort ? { model_reasoning_effort: input.reasoningEffort } : null,
-      persistExtendedHistory: false,
-      ephemeral: false,
+      approvalPolicy: input.approvalPolicy ?? null,
+      approvalsReviewer: input.approvalsReviewer ?? null,
+      sandbox: input.sandbox ?? null,
+      config: mergeConfig(input.config ?? null, input.reasoningEffort),
+      serviceTier: input.serviceTier ?? null,
+      serviceName: input.serviceName ?? null,
+      baseInstructions: input.baseInstructions ?? null,
+      developerInstructions: input.developerInstructions ?? null,
+      persistExtendedHistory: input.persistExtendedHistory ?? false,
+      ephemeral: input.ephemeral ?? false,
     })) as { thread?: { id?: string; path?: string | null }; reasoningEffort?: string | null };
     const threadHandle = response.thread?.id;
     if (!threadHandle) {
@@ -376,8 +411,16 @@ export class CodexBackend implements IBackend {
       threadId: input.threadHandle,
       input: input.input,
       cwd: input.cwd,
+      approvalPolicy: input.approvalPolicy ?? null,
+      approvalsReviewer: input.approvalsReviewer ?? null,
+      sandboxPolicy: input.sandboxPolicy ?? null,
       model: input.model,
+      serviceTier: input.serviceTier ?? null,
       effort: input.reasoningEffort,
+      summary: input.summary ?? null,
+      personality: input.personality ?? null,
+      outputSchema: input.outputSchema ?? null,
+      collaborationMode: input.collaborationMode ?? null,
     })) as { turn?: { id?: string | null } };
     return {
       accepted: true,

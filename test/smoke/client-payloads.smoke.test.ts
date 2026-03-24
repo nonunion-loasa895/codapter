@@ -176,6 +176,7 @@ async function createMockCodexSubagentScript(rootDir: string): Promise<string> {
     "    setTimeout(() => {",
     "      write({ method: 'turn/started', params: { threadId: payload.params.threadId, turnId: 'turn_backend', turn: { id: 'turn_backend', items: [], status: 'inProgress', error: null } } });",
     "      write({ method: 'item/completed', params: { threadId: payload.params.threadId, turnId: 'turn_backend', item: { type: 'collabAgentToolCall', id: 'call_spawn_1', tool: 'spawnAgent', status: 'completed', senderThreadId: 'parent_backend', receiverThreadIds: ['child_backend'], prompt: 'Run `date` and report back.', model: payload.params.model ?? 'gpt-5.4-mini', reasoningEffort: 'medium', agentsStates: { child_backend: { status: 'pendingInit', message: null } } } } });",
+    "      write({ method: 'item/completed', params: { threadId: payload.params.threadId, turnId: 'turn_backend', item: { type: 'collabAgentToolCall', id: 'call_wait_1', tool: 'wait', status: 'completed', senderThreadId: 'parent_backend', receiverThreadIds: ['child_backend'], prompt: null, model: null, reasoningEffort: null, agentsStates: { child_backend: { status: 'completed', message: 'Done' } } } } });",
     "      write({ method: 'turn/completed', params: { threadId: payload.params.threadId, turnId: 'turn_backend', turn: { id: 'turn_backend', items: [], status: 'completed', error: null } } });",
     "    }, 10);",
     "    return;",
@@ -378,6 +379,25 @@ describe("client payload smoke", () => {
         },
       });
       expect(JSON.stringify(completed)).not.toContain("codex::");
+
+      const waitCompleted = notifications.findLast(
+        (entry) =>
+          entry.method === "item/completed" &&
+          isRecord(entry.params?.item) &&
+          entry.params.item.type === "collabAgentToolCall" &&
+          entry.params.item.tool === "wait"
+      );
+      expect(waitCompleted?.params?.item).toMatchObject({
+        type: "collabAgentToolCall",
+        senderThreadId: started.result.thread.id,
+        receiverThreadIds: [childThreadId],
+        agentsStates: {
+          [childThreadId]: {
+            status: "completed",
+            message: "Done",
+          },
+        },
+      });
 
       await expect(
         connection.handleMessage({

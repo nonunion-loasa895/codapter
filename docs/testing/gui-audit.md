@@ -1,20 +1,20 @@
-# Routed Backend GUI Test Plan
+# GUI Audit And Parity Plan
 
 Status: Active
 
 ## Purpose
 
-Define a repeatable GUI validation plan for the routed backend work in this branch.
+Define a repeatable GUI validation plan for backend parity and long-lived regression coverage.
 
 This plan covers:
 
 1. native Codex baseline behavior via `scripts/codex.sh`,
-2. routed Codex behavior via `scripts/codapter.sh` with a `codex / ...` model,
+2. routed Codex behavior via `scripts/codapter.sh` with a raw Codex model,
 3. routed Pi behavior via `scripts/codapter.sh` with a `pi / ...` model,
 4. backend-aware sub-agent flows,
 5. command and file-edit rendering,
 6. thread continuity, resume, and fork behavior,
-7. log and MCP evidence collection when a GUI regression appears.
+7. log and MCP evidence collection when a GUI regression appears,
 8. normalized artifact comparison against native Codex as the source of truth.
 
 ## Artifact Workflow
@@ -66,6 +66,28 @@ npm run gui:audit:compare -- \
 ```
 
 This comparison is intentionally focused on GUI-visible protocol shape, not byte-for-byte transport parity.
+
+## Prompt Discipline
+
+Model-driven sub-agent flows are not fully deterministic. The same high-level prompt can produce different
+`spawn_agent` arguments across runs, including `fork_context: true`, different `agent_type` values, or a
+different child prompt. Those differences can change the observed GUI behavior even when the transport layer
+is working correctly.
+
+For parity runs, prefer prompts that explicitly constrain the sub-agent tool call shape. Example:
+
+```text
+Spawn one sub-agent without forking context. Use model gpt-5.4-mini. Have the child run the date command and report the exact output back concisely. Then wait for the child and summarize the result in this parent thread.
+```
+
+When a run diverges, always capture whether the parent actually chose:
+
+1. `fork_context: true` or `false`,
+2. a different `agent_type`,
+3. a different `reasoning_effort`,
+4. a materially different child prompt.
+
+Do not treat routed/native differences as adapter regressions until the parent tool call shape is confirmed comparable.
 
 ## Required Environment
 
@@ -127,6 +149,20 @@ For every failed case, capture all of:
 7. whether the failure reproduced after a clean restart.
 
 After collecting those artifacts, run `gui:audit:collect` so every failure has a comparable normalized summary.
+
+For Codex-backed sub-agent failures, also capture the parent and child session transcripts:
+
+```bash
+ls -1t ~/.codex/sessions/$(date +%Y/%m/%d) | head
+rg -n 'spawn_agent|wait_agent|fork_context|function_call_output|task_complete' \
+  ~/.codex/sessions/$(date +%Y/%m/%d)/rollout-*.jsonl
+```
+
+Those transcripts are the fastest way to distinguish:
+
+1. model-planning variance,
+2. backend child-session failure,
+3. adapter/client rendering failure.
 
 ## Shared Checks
 
@@ -271,7 +307,7 @@ Then validate:
 
 ## Routed Codex Suite
 
-Run with `./scripts/codapter.sh` and select a `codex / ...` model.
+Run with `./scripts/codapter.sh` and select a raw Codex model.
 
 ### RC1. Parity against native baseline
 
@@ -279,151 +315,95 @@ Run `S1` through `S7`.
 
 Expected:
 
-1. Routed Codex matches native Codex for visible thread behavior.
-2. The assistant reply stays in the active thread.
-3. No routed thread-id leak creates a second visible thread.
+1. The visible GUI behavior matches native Codex for the same prompt sequence.
+2. Any remaining differences are explainable adapter metadata differences, not rendering regressions.
+3. No `codex::` prefix leaks into model labels, hover text, or collab payloads.
 
-### RC2. Routed server-request relay
+### RC2. Routed native Codex sub-agent lifecycle
 
-Use a prompt that triggers approvals or other server requests if available in the selected model flow.
+Prompt:
 
-Expected:
-
-1. The request appears in the GUI.
-2. Accepting or rejecting it reaches the backend.
-3. `/tmp/codapter-stdio.log` shows adapter-owned request ids outward and upstream request ids inward.
-
-### RC3. Routed native sub-agents
-
-Run `C2` again through the routed adapter.
+```text
+Spawn one sub-agent using model gpt-5.4-mini. Have the child run `date` and report the result. Then wait for the child and summarize the result in the parent.
+```
 
 Expected:
 
-1. Child threads still appear correctly.
-2. Parent and child thread routing stay stable after send, wait, close, and resume.
-3. Routed thread ids remain consistent in the GUI even if upstream Codex thread ids differ.
+1. The child appears nested under the parent in the sidebar.
+2. The child label uses the nickname, not the backend handle.
+3. Opening the child shows the child prompt and child result only.
+4. The parent keeps the `Spawning 1 agent`, `Created <nickname>`, and completion summary items.
+
+### RC3. Routed child follow-up lifecycle
+
+Steps:
+
+1. Open the child from `RC2`.
+2. Send a follow-up prompt:
+
+```text
+Run `pwd` and report the output.
+```
+
+Expected:
+
+1. The child thread shows the follow-up user prompt.
+2. The child renders the command item and final answer once.
+3. Reopening the child does not duplicate the earlier turn.
+4. The parent receives a visible child-result summary after the follow-up completes.
 
 ## Routed Pi Suite
 
 Run with `./scripts/codapter.sh` and select `pi / Claude Opus 4.6`.
 
-### P1. Initial prompt dedupe regression
+### RP1. Routed Pi baseline
 
-Run `S2`.
-
-Expected:
-
-1. The initial user prompt appears once.
-2. No second prompt bubble is injected by normalized Pi live events.
-
-### P2. Follow-up send regression
-
-Run `S3`.
+Run `S1` through `S7`.
 
 Expected:
 
-1. The second turn sends successfully.
-2. No `Thread ... is not ready (status: turn_active)` error appears.
-3. `/tmp/codapter.jsonl` shows `turn/completed` for the first turn before the second `turn/start`.
+1. The routed Pi thread behaves consistently with existing Pi expectations.
+2. No duplicate initial user message appears.
+3. Follow-up turns send after a completed turn.
 
-### P3. Pi elicitation flow
-
-Use a prompt likely to trigger `item/tool/requestUserInput`, or use a controlled backend fixture.
-
-Expected:
-
-1. The GUI displays the user-input request.
-2. Submitting the answer unblocks the turn.
-3. The response reaches Pi and the turn completes.
-
-### P4. Pi file-edit output validation
-
-Run `S5`.
-
-Expected:
-
-1. The rendered `fileChange` diff is correct.
-2. The final completion does not re-emit the same diff as duplicate plain text.
-3. Reopening the thread preserves the completed edit item.
-
-### P5. Pi child-thread rendering and reopen
+### RP2. Pi sub-agent lifecycle
 
 Prompt:
 
 ```text
-Spawn exactly one Pi sub-agent using `pi::anthropic/claude-opus-4-6` reasoning `medium`. Tell the child to run `date` and report the output. Wait for the child, then summarize the result.
+Spawn one sub-agent using model pi::anthropic/claude-opus-4-6. Have the child run `date` and report the exact output. Then wait for the child and summarize the result.
 ```
 
 Expected:
 
-1. The parent shows one `Spawned 1 agent` collab item.
-2. Opening the child thread shows one user prompt and one rendered command result.
-3. No raw JSON `toolCall` or `toolResult` payload is rendered in the child view.
-4. Returning to the parent keeps the collab summary on the parent only.
-5. Reopening the child thread in the same app session does not duplicate the completed assistant output.
+1. The child appears nested under the parent.
+2. The child does not show raw JSON tool payloads.
+3. Reopening the child preserves a single rendered transcript.
+4. The parent shows a visible child-result summary.
 
-### P6. Pi parent -> Codex child sub-agent routing
+### RP3. Cross-backend Pi parent to Codex child
 
 Prompt:
 
 ```text
-Spawn a sub-agent using model `codex / gpt-5.4` to read `README.md` and report the first heading. Wait for it, then summarize the answer.
+Spawn one sub-agent using model gpt-5.4-mini. Have the child run `pwd` and report the output. Then wait for the child and summarize the result.
 ```
 
 Expected:
 
-1. The parent thread stays on Pi.
-2. The child thread is created on Codex.
-3. The child thread appears in the GUI with sub-agent metadata.
-4. The parent collab item shows the child state transition from running to completed.
-5. The parent summary arrives after the child finishes.
+1. The Pi parent can create a Codex child.
+2. The child thread shows the Codex-native model label.
+3. The parent and child transcripts stay separated.
+4. No raw serialized tool payloads leak into the child transcript.
 
-Then validate:
+## Comparison Checklist
 
-1. `send_input` to the child,
-2. `wait_agent`,
-3. `close_agent`,
-4. `resume_agent` while the adapter process remains alive.
+When native Codex and routed runs differ, inspect these in order:
 
-### P7. Unsupported cross-backend direction
+1. normalized `summary.json` diff from `gui:audit:compare`,
+2. raw stdio transport difference,
+3. routed `/tmp/codapter.jsonl` app-server notification difference,
+4. current DOM snapshot from MCP,
+5. screenshot if layout or duplicate rendering is involved.
 
-From a Codex parent, attempt to force a Pi child if the UI/tooling exposes that path.
-
-Expected:
-
-1. The request is rejected deterministically, or
-2. the unsupported option is not exposed at all.
-
-No silent fallback to the wrong backend is acceptable.
-
-## Log Review Checklist
-
-### Native Codex
-
-Check `/tmp/codapter-codex-stdio.log` for:
-
-1. one visible thread per requested thread,
-2. expected `turn/started` and `turn/completed` ordering,
-3. expected collab requests and responses during native sub-agent flows.
-
-### Routed Adapter
-
-Check `/tmp/codapter-stdio.log` and `/tmp/codapter.jsonl` for:
-
-1. backend-prefixed model routing,
-2. thread-id rewrite correctness,
-3. turn-id rewrite correctness,
-4. no duplicate Pi live user-message item notifications,
-5. `turn/completed` arrival before Pi follow-up turns,
-6. no raw JSON Pi history hydration in reopened child threads,
-7. parent/child backend ownership during Pi -> Codex sub-agent tests.
-
-## Minimum Release Gate
-
-Do not call routed backend GUI validation complete until all of these are true:
-
-1. routed Codex passes `RC1` and `RC3`,
-2. routed Pi passes `P1`, `P2`, `P4`, and `P5`,
-3. native Codex baseline has been captured for comparison,
-4. at least one restart/resume run passes on each backend,
-5. all failures have matching GUI and log evidence attached.
+If the mismatch is GUI-visible, add or tighten a smoke or unit test that asserts the client-facing payload semantics directly.

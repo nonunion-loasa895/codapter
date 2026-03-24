@@ -1,5 +1,5 @@
 import type { JsonRpcId } from "./jsonrpc.js";
-import type { Turn, UserInput } from "./protocol.js";
+import type { JsonValue, SandboxMode, Turn, UserInput } from "./protocol.js";
 
 export interface Disposable {
   dispose(): void;
@@ -74,6 +74,18 @@ export interface BackendThreadStartInput {
   readonly cwd: string;
   readonly model: string | null;
   readonly reasoningEffort: string | null;
+  readonly approvalPolicy?: string | null;
+  readonly approvalsReviewer?: string | null;
+  readonly sandbox?: SandboxMode | null;
+  readonly config?: { [key: string]: JsonValue | undefined } | null;
+  readonly serviceTier?: string | null;
+  readonly serviceName?: string | null;
+  readonly baseInstructions?: string | null;
+  readonly developerInstructions?: string | null;
+  readonly personality?: string | null;
+  readonly ephemeral?: boolean | null;
+  readonly experimentalRawEvents?: boolean;
+  readonly persistExtendedHistory?: boolean;
   readonly launchConfig?: BackendSessionLaunchConfig;
 }
 
@@ -90,6 +102,16 @@ export interface BackendThreadResumeInput {
   readonly cwd: string;
   readonly model: string | null;
   readonly reasoningEffort: string | null;
+  readonly approvalPolicy?: string | null;
+  readonly approvalsReviewer?: string | null;
+  readonly sandbox?: SandboxMode | null;
+  readonly config?: { [key: string]: JsonValue | undefined } | null;
+  readonly serviceTier?: string | null;
+  readonly serviceName?: string | null;
+  readonly baseInstructions?: string | null;
+  readonly developerInstructions?: string | null;
+  readonly personality?: string | null;
+  readonly persistExtendedHistory?: boolean;
   readonly launchConfig?: BackendSessionLaunchConfig;
 }
 
@@ -107,6 +129,17 @@ export interface BackendThreadForkInput {
   readonly cwd: string;
   readonly model: string | null;
   readonly reasoningEffort: string | null;
+  readonly approvalPolicy?: string | null;
+  readonly approvalsReviewer?: string | null;
+  readonly sandbox?: SandboxMode | null;
+  readonly config?: { [key: string]: JsonValue | undefined } | null;
+  readonly serviceTier?: string | null;
+  readonly serviceName?: string | null;
+  readonly baseInstructions?: string | null;
+  readonly developerInstructions?: string | null;
+  readonly personality?: string | null;
+  readonly ephemeral?: boolean | null;
+  readonly persistExtendedHistory?: boolean;
   readonly launchConfig?: BackendSessionLaunchConfig;
 }
 
@@ -223,6 +256,14 @@ export interface BackendTurnStartInput {
   readonly input: readonly UserInput[];
   readonly model: string | null;
   readonly reasoningEffort: string | null;
+  readonly approvalPolicy?: string | null;
+  readonly approvalsReviewer?: string | null;
+  readonly sandboxPolicy?: JsonValue | null;
+  readonly serviceTier?: string | null;
+  readonly summary?: string | null;
+  readonly personality?: string | null;
+  readonly outputSchema?: JsonValue | null;
+  readonly collaborationMode?: JsonValue | null;
   readonly emitUserMessage?: boolean;
 }
 

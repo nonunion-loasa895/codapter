@@ -1,21 +1,31 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createCodexBackend } from "../src/index.js";
 
-async function createMockCodexScript(rootDir: string): Promise<string> {
+async function createMockCodexScript(
+  rootDir: string
+): Promise<{ scriptPath: string; requestsPath: string }> {
   const scriptPath = join(rootDir, "mock-codex-app-server.mjs");
+  const requestsPath = join(rootDir, "requests.jsonl");
   const script = [
+    "import { appendFileSync } from 'node:fs';",
     "import { StringDecoder } from 'node:string_decoder';",
     "const decoder = new StringDecoder('utf8');",
     "let buffer = '';",
+    `const requestsPath = ${JSON.stringify(requestsPath)};`,
     "",
     "function write(value) {",
     "  process.stdout.write(JSON.stringify(value) + '\\n');",
     "}",
     "",
+    "function record(payload) {",
+    "  appendFileSync(requestsPath, JSON.stringify(payload) + '\\n');",
+    "}",
+    "",
     "function handleMessage(payload) {",
+    "  record(payload);",
     "  if (payload.method === 'initialize') {",
     "    write({ id: payload.id, result: { userAgent: 'mock-codex', platformFamily: 'unix', platformOs: 'linux' } });",
     "    return;",
@@ -75,7 +85,7 @@ async function createMockCodexScript(rootDir: string): Promise<string> {
     "});",
   ].join("\n");
   await writeFile(scriptPath, script, "utf8");
-  return scriptPath;
+  return { scriptPath, requestsPath };
 }
 
 async function createExitOnTurnStartScript(rootDir: string): Promise<string> {
@@ -140,7 +150,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1500): Promise<void
 describe("CodexBackend", () => {
   it("proxies stdio app-server requests and relays notifications/server requests", async () => {
     const root = await mkdtemp(join(tmpdir(), "codapter-codex-test-"));
-    const mockScript = await createMockCodexScript(root);
+    const { scriptPath: mockScript } = await createMockCodexScript(root);
     const backend = createCodexBackend({
       command: "node",
       args: [mockScript],
@@ -190,6 +200,108 @@ describe("CodexBackend", () => {
     await backend.dispose();
   });
 
+  it("forwards desktop thread and turn settings to native Codex", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codapter-codex-test-"));
+    const { scriptPath: mockScript, requestsPath } = await createMockCodexScript(root);
+    const backend = createCodexBackend({
+      command: "node",
+      args: [mockScript],
+    });
+    await backend.initialize();
+
+    const started = await backend.threadStart({
+      threadId: "thr_local",
+      cwd: process.cwd(),
+      model: "gpt-5.4",
+      reasoningEffort: "medium",
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      sandbox: "workspace-write",
+      config: {
+        features: {
+          personality: true,
+        },
+      },
+      serviceTier: "auto",
+      serviceName: "codex_desktop",
+      baseInstructions: "base instructions",
+      developerInstructions: "developer instructions",
+      personality: "friendly",
+      experimentalRawEvents: true,
+      persistExtendedHistory: true,
+      launchConfig: {},
+    });
+
+    await backend.turnStart({
+      threadId: "thr_local",
+      threadHandle: started.threadHandle,
+      turnId: "turn_local",
+      cwd: process.cwd(),
+      input: [{ type: "text", text: "hello", text_elements: [] }],
+      model: "gpt-5.4",
+      reasoningEffort: "medium",
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      sandboxPolicy: {
+        type: "workspaceWrite",
+      },
+      serviceTier: "auto",
+      summary: "none",
+      personality: "friendly",
+      outputSchema: {
+        type: "object",
+      },
+      collaborationMode: {
+        mode: "default",
+      },
+    });
+
+    const requests = (await readFile(requestsPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { method?: string; params?: Record<string, unknown> });
+    const threadStartRequest = requests.find((entry) => entry.method === "thread/start");
+    const turnStartRequest = requests.find((entry) => entry.method === "turn/start");
+
+    expect(threadStartRequest?.params).toMatchObject({
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      sandbox: "workspace-write",
+      config: {
+        features: {
+          personality: true,
+        },
+        model_reasoning_effort: "medium",
+      },
+      serviceTier: "auto",
+      serviceName: "codex_desktop",
+      baseInstructions: "base instructions",
+      developerInstructions: "developer instructions",
+      personality: "friendly",
+      experimentalRawEvents: true,
+      persistExtendedHistory: true,
+    });
+    expect(turnStartRequest?.params).toMatchObject({
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      sandboxPolicy: {
+        type: "workspaceWrite",
+      },
+      serviceTier: "auto",
+      effort: "medium",
+      summary: "none",
+      personality: "friendly",
+      outputSchema: {
+        type: "object",
+      },
+      collaborationMode: {
+        mode: "default",
+      },
+    });
+
+    await backend.dispose();
+  });
+
   it("rejects websocket mode deterministically", async () => {
     const backend = createCodexBackend({
       transport: "websocket",
@@ -213,7 +325,7 @@ describe("CodexBackend", () => {
 
   it("supports codex thread lifecycle relay methods", async () => {
     const root = await mkdtemp(join(tmpdir(), "codapter-codex-test-"));
-    const mockScript = await createMockCodexScript(root);
+    const { scriptPath: mockScript } = await createMockCodexScript(root);
     const backend = createCodexBackend({
       command: "node",
       args: [mockScript],

@@ -7,12 +7,18 @@ import type { CollabManagerNotificationSink } from "../src/collab-manager.js";
 import type { CollabManagerCreateChildThreadInput } from "../src/collab-manager.js";
 
 class TestBackend implements IBackend {
-  public readonly backendType = "pi";
+  public readonly backendType: string;
   private readonly listeners = new Map<string, Set<(event: BackendAppServerEvent) => void>>();
   private sessionCounter = 0;
   public prompts: Array<{ sessionId: string; turnId: string; text: string }> = [];
   public abortedSessionIds: string[] = [];
   public disposedSessionIds: string[] = [];
+  public threadStartCalls: Array<{ threadId: string; model: string | null }> = [];
+  public threadForkCalls: Array<{ sourceThreadHandle: string; model: string | null }> = [];
+
+  constructor(backendType = "pi") {
+    this.backendType = backendType;
+  }
 
   async initialize() {}
   async dispose() {}
@@ -75,6 +81,7 @@ class TestBackend implements IBackend {
     model: string | null;
     reasoningEffort: string | null;
   }) {
+    this.threadStartCalls.push({ threadId: input.threadId, model: input.model });
     const sessionId = await this.createSession();
     return {
       threadHandle: sessionId,
@@ -100,6 +107,10 @@ class TestBackend implements IBackend {
     model: string | null;
     reasoningEffort: string | null;
   }) {
+    this.threadForkCalls.push({
+      sourceThreadHandle: input.sourceThreadHandle,
+      model: input.model,
+    });
     const sessionId = await this.forkSession(input.sourceThreadHandle);
     return {
       threadHandle: sessionId,
@@ -234,7 +245,7 @@ function createManager(options: {
       return `session:${threadId}`;
     },
     resolveThreadBackendType() {
-      return "pi";
+      return backend.backendType;
     },
     async createChildThread(input) {
       childThreadIds.push(input.threadId);
@@ -407,6 +418,25 @@ describe("CollabManager", () => {
         message: "second",
       })
     ).rejects.toThrow("Maximum collab agent count reached");
+  });
+
+  it("uses threadStart instead of threadFork for Codex fork_context spawns", async () => {
+    const backend = new TestBackend("codex");
+    const { manager, parentThreadId } = createManager({ backend });
+
+    await manager.spawn({
+      parentThreadId,
+      message: "delegate with context",
+      forkContext: true,
+      model: "codex::gpt-5.4-mini",
+    });
+
+    expect(backend.threadForkCalls).toEqual([]);
+    expect(backend.threadStartCalls).toEqual([
+      expect.objectContaining({
+        model: "gpt-5.4-mini",
+      }),
+    ]);
   });
 
   it("rejects spawns when maxDepth is reached", async () => {

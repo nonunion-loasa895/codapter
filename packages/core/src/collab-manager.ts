@@ -27,6 +27,7 @@ import type {
   CollabWaitRequest,
   CollabWaitResponse,
 } from "./collab-types.js";
+import type { JsonValue, SandboxMode } from "./protocol.js";
 
 const DEFAULT_CONFIG: CollabConfig = {
   maxAgents: 10,
@@ -68,6 +69,22 @@ export interface CollabManagerCreateChildThreadInput {
   reasoningEffort: string | null;
 }
 
+export interface CollabThreadExecutionContext {
+  readonly cwd: string;
+  readonly approvalPolicy: string | null;
+  readonly approvalsReviewer: string | null;
+  readonly sandbox: SandboxMode | null;
+  readonly sandboxPolicy: JsonValue | null;
+  readonly config: { [key: string]: JsonValue | undefined } | null;
+  readonly serviceTier: string | null;
+  readonly serviceName: string | null;
+  readonly baseInstructions: string | null;
+  readonly developerInstructions: string | null;
+  readonly personality: string | null;
+  readonly summary: string | null;
+  readonly collaborationMode: JsonValue | null;
+}
+
 export interface CollabManagerOptions {
   backend?: IBackend;
   backendRouter?: BackendRouter;
@@ -79,6 +96,7 @@ export interface CollabManagerOptions {
   createSessionLaunchConfig?(
     threadId: string
   ): BackendSessionLaunchConfig | Promise<BackendSessionLaunchConfig>;
+  resolveThreadExecutionContext?(threadId: string): CollabThreadExecutionContext | null;
   createChildThread(input: CollabManagerCreateChildThreadInput): Promise<void>;
   startChildTurn?(input: { agent: CollabAgent; message: string }): string | Promise<string>;
   onChildAgentEvent?(input: {
@@ -115,6 +133,9 @@ export class CollabManager {
   private readonly createSessionLaunchConfig: (
     threadId: string
   ) => BackendSessionLaunchConfig | Promise<BackendSessionLaunchConfig>;
+  private readonly resolveThreadExecutionContext: (
+    threadId: string
+  ) => CollabThreadExecutionContext | null;
   private readonly createChildThread: CollabManagerOptions["createChildThread"];
   private readonly startChildTurn: CollabManagerOptions["startChildTurn"];
   private readonly onChildAgentEvent: CollabManagerOptions["onChildAgentEvent"];
@@ -131,6 +152,7 @@ export class CollabManager {
       options.resolveThreadHandle ?? options.resolveThreadSessionId ?? ((threadId) => threadId);
     this.resolveThreadBackendType = options.resolveThreadBackendType ?? (() => "pi");
     this.createSessionLaunchConfig = options.createSessionLaunchConfig ?? (() => ({}));
+    this.resolveThreadExecutionContext = options.resolveThreadExecutionContext ?? (() => null);
     this.createChildThread = options.createChildThread;
     this.startChildTurn = options.startChildTurn;
     this.onChildAgentEvent = options.onChildAgentEvent;
@@ -160,25 +182,47 @@ export class CollabManager {
       );
     }
 
+    const parentContext = this.resolveThreadExecutionContext(req.parentThreadId);
     const sessionLaunchConfig = await this.createSessionLaunchConfig(threadId);
-    const threadStart: BackendThreadStartResult | BackendThreadForkResult = req.forkContext
+    const useBackendFork = req.forkContext && parentBackendType !== "codex";
+    const threadStart: BackendThreadStartResult | BackendThreadForkResult = useBackendFork
       ? await parentBackend.threadFork({
           threadId,
           sourceThreadId: req.parentThreadId,
           sourceThreadHandle: this.resolveThreadHandle(req.parentThreadId),
-          cwd: process.cwd(),
+          cwd: parentContext?.cwd ?? process.cwd(),
           model: modelSelection?.selection.rawModelId ?? null,
           reasoningEffort: req.reasoningEffort ?? null,
+          approvalPolicy: parentContext?.approvalPolicy ?? null,
+          approvalsReviewer: parentContext?.approvalsReviewer ?? null,
+          sandbox: parentContext?.sandbox ?? null,
+          config: parentContext?.config ?? null,
+          serviceTier: parentContext?.serviceTier ?? null,
+          serviceName: parentContext?.serviceName ?? null,
+          baseInstructions: parentContext?.baseInstructions ?? null,
+          developerInstructions: parentContext?.developerInstructions ?? null,
+          personality: parentContext?.personality ?? null,
+          persistExtendedHistory: false,
           launchConfig: sessionLaunchConfig,
         })
       : await childBackend.threadStart({
           threadId,
-          cwd: process.cwd(),
+          cwd: parentContext?.cwd ?? process.cwd(),
           model: modelSelection?.selection.rawModelId ?? null,
           reasoningEffort: req.reasoningEffort ?? null,
+          approvalPolicy: parentContext?.approvalPolicy ?? null,
+          approvalsReviewer: parentContext?.approvalsReviewer ?? null,
+          sandbox: parentContext?.sandbox ?? null,
+          config: parentContext?.config ?? null,
+          serviceTier: parentContext?.serviceTier ?? null,
+          serviceName: parentContext?.serviceName ?? null,
+          baseInstructions: parentContext?.baseInstructions ?? null,
+          developerInstructions: parentContext?.developerInstructions ?? null,
+          personality: parentContext?.personality ?? null,
+          persistExtendedHistory: false,
           launchConfig: sessionLaunchConfig,
         });
-    const backendType = (req.forkContext ? parentBackend : childBackend).backendType;
+    const backendType = (useBackendFork ? parentBackend : childBackend).backendType;
     const threadHandle = threadStart.threadHandle;
     const selectedModel =
       req.model ??
@@ -410,22 +454,45 @@ export class CollabManager {
     let sessionId = agent.sessionId;
     let backendType = runtime?.backendType ?? this.resolveThreadBackendType(agent.threadId);
     const backend = this.requireBackend(backendType);
+    const context =
+      this.resolveThreadExecutionContext(agent.threadId) ??
+      this.resolveThreadExecutionContext(req.parentThreadId);
     try {
       const resumed = await backend.threadResume({
         threadId: agent.threadId,
         threadHandle: agent.sessionId,
-        cwd: process.cwd(),
+        cwd: context?.cwd ?? process.cwd(),
         model: null,
         reasoningEffort: null,
+        approvalPolicy: context?.approvalPolicy ?? null,
+        approvalsReviewer: context?.approvalsReviewer ?? null,
+        sandbox: context?.sandbox ?? null,
+        config: context?.config ?? null,
+        serviceTier: context?.serviceTier ?? null,
+        serviceName: context?.serviceName ?? null,
+        baseInstructions: context?.baseInstructions ?? null,
+        developerInstructions: context?.developerInstructions ?? null,
+        personality: context?.personality ?? null,
+        persistExtendedHistory: false,
         launchConfig: await this.createSessionLaunchConfig(agent.threadId),
       });
       sessionId = resumed.threadHandle;
     } catch {
       const started = await backend.threadStart({
         threadId: agent.threadId,
-        cwd: process.cwd(),
+        cwd: context?.cwd ?? process.cwd(),
         model: null,
         reasoningEffort: null,
+        approvalPolicy: context?.approvalPolicy ?? null,
+        approvalsReviewer: context?.approvalsReviewer ?? null,
+        sandbox: context?.sandbox ?? null,
+        config: context?.config ?? null,
+        serviceTier: context?.serviceTier ?? null,
+        serviceName: context?.serviceName ?? null,
+        baseInstructions: context?.baseInstructions ?? null,
+        developerInstructions: context?.developerInstructions ?? null,
+        personality: context?.personality ?? null,
+        persistExtendedHistory: false,
         launchConfig: await this.createSessionLaunchConfig(agent.threadId),
       });
       sessionId = started.threadHandle;
@@ -605,14 +672,24 @@ export class CollabManager {
 
     try {
       const backend = this.requireBackend(runtime.backendType);
+      const context =
+        this.resolveThreadExecutionContext(agent.threadId) ??
+        this.resolveThreadExecutionContext(agent.parentThreadId);
       await backend.turnStart({
         threadId: agent.threadId,
         threadHandle: agent.sessionId,
         turnId: runtime.activeTurnId,
-        cwd: process.cwd(),
+        cwd: context?.cwd ?? process.cwd(),
         input: [{ type: "text", text: message, text_elements: [] }],
         model: null,
         reasoningEffort: null,
+        approvalPolicy: context?.approvalPolicy ?? null,
+        approvalsReviewer: context?.approvalsReviewer ?? null,
+        sandboxPolicy: context?.sandboxPolicy ?? null,
+        serviceTier: context?.serviceTier ?? null,
+        summary: context?.summary ?? null,
+        personality: context?.personality ?? null,
+        collaborationMode: context?.collaborationMode ?? null,
         emitUserMessage: true,
       });
     } catch (error) {

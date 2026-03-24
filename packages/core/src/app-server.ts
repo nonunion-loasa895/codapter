@@ -179,6 +179,22 @@ interface PendingBackendServerRequest {
   backendRequestId: string | number;
 }
 
+interface ThreadExecutionContext {
+  readonly cwd: string;
+  readonly approvalPolicy: string | null;
+  readonly approvalsReviewer: string | null;
+  readonly sandbox: SandboxMode | null;
+  readonly sandboxPolicy: JsonValue | null;
+  readonly config: { [key: string]: JsonValue | undefined } | null;
+  readonly serviceTier: string | null;
+  readonly serviceName: string | null;
+  readonly baseInstructions: string | null;
+  readonly developerInstructions: string | null;
+  readonly personality: string | null;
+  readonly summary: string | null;
+  readonly collaborationMode: JsonValue | null;
+}
+
 type StoredAuthState =
   | { mode: "apikey"; apiKey: string }
   | {
@@ -442,7 +458,9 @@ function runtimeToThreadStatus(runtime: ThreadRuntime | undefined): ThreadStatus
   }
 }
 
-function isSubAgentThreadSource(source: ThreadRegistryEntry["source"]): boolean {
+function isSubAgentThreadSource(
+  source: ThreadRegistryEntry["source"]
+): source is Extract<ThreadRegistryEntry["source"], { subAgent: unknown }> {
   return "subAgent" in source;
 }
 
@@ -505,6 +523,7 @@ export class AppServerConnection {
   private readonly collabUdsListener: CollabUdsListener | null;
   private readonly collabReady: Promise<void>;
   private readonly threadRuntimes = new Map<string, ThreadRuntime>();
+  private readonly threadExecutionContexts = new Map<string, ThreadExecutionContext>();
   private readonly pendingBackendServerRequests = new Map<
     string | number,
     PendingBackendServerRequest
@@ -574,6 +593,7 @@ export class AppServerConnection {
           return runtime.backendType;
         },
         createSessionLaunchConfig: (threadId) => this.createBackendSessionLaunchConfig(threadId),
+        resolveThreadExecutionContext: (threadId) => this.cloneThreadExecutionContext(threadId),
         createChildThread: async (input) => {
           await this.createCollabChildThread(input);
         },
@@ -616,13 +636,16 @@ export class AppServerConnection {
   async dispose(): Promise<void> {
     await this.collabUdsListener?.close().catch(() => {});
     await this.collabManager?.dispose().catch(() => {});
+    const pendingEventQueues: Promise<void>[] = [];
     for (const runtime of this.threadRuntimes.values()) {
       runtime.status = "terminating";
       runtime.readyResolver?.();
       runtime.readyResolver = null;
       runtime.readyPromise = null;
       runtime.subscription?.dispose();
+      pendingEventQueues.push(runtime.eventQueue.catch(() => {}));
     }
+    await Promise.all(pendingEventQueues);
     this.pendingBackendServerRequests.clear();
     this.threadRuntimes.clear();
     await this.commandExecManager.dispose();
@@ -1197,6 +1220,18 @@ export class AppServerConnection {
       cwd: parsed.cwd ?? process.cwd(),
       model: selection.selection.rawModelId,
       reasoningEffort: effectiveReasoningEffort,
+      approvalPolicy: parsed.approvalPolicy ?? null,
+      approvalsReviewer: parsed.approvalsReviewer ?? null,
+      sandbox: parsed.sandbox ?? null,
+      config: parsed.config ?? null,
+      serviceTier: parsed.serviceTier ?? null,
+      serviceName: parsed.serviceName ?? null,
+      baseInstructions: parsed.baseInstructions ?? null,
+      developerInstructions: parsed.developerInstructions ?? null,
+      personality: parsed.personality ?? null,
+      ephemeral: parsed.ephemeral ?? null,
+      experimentalRawEvents: parsed.experimentalRawEvents,
+      persistExtendedHistory: parsed.persistExtendedHistory,
       launchConfig: await this.createBackendSessionLaunchConfig(threadId),
     });
     const selectedModel = this.backendRouter.toClientModelId(
@@ -1224,6 +1259,21 @@ export class AppServerConnection {
     this.transitionToReady(entry.threadId, runtime);
 
     const thread = this.buildThread(entry, []);
+    this.recordThreadExecutionContext(entry.threadId, {
+      cwd: parsed.cwd ?? process.cwd(),
+      approvalPolicy: parsed.approvalPolicy ?? DEFAULT_APPROVAL_POLICY,
+      approvalsReviewer: parsed.approvalsReviewer ?? DEFAULT_APPROVALS_REVIEWER,
+      sandbox: parsed.sandbox ?? null,
+      sandboxPolicy: buildSandboxPolicy(parsed.sandbox ?? null, parsed.cwd ?? process.cwd()),
+      config: parsed.config ?? null,
+      serviceTier: parsed.serviceTier ?? null,
+      serviceName: parsed.serviceName ?? null,
+      baseInstructions: parsed.baseInstructions ?? null,
+      developerInstructions: parsed.developerInstructions ?? null,
+      personality: parsed.personality ?? null,
+      summary: null,
+      collaborationMode: null,
+    });
     await this.publish("thread/started", { thread }, entry.threadId);
     await this.publishThreadStatus(entry.threadId);
     return await this.buildThreadExecutionResponse(
@@ -1285,6 +1335,16 @@ export class AppServerConnection {
         cwd: parsed.cwd ?? entry.cwd ?? process.cwd(),
         model: requestedSelection?.selection.rawModelId ?? null,
         reasoningEffort: effectiveReasoningEffort,
+        approvalPolicy: parsed.approvalPolicy ?? null,
+        approvalsReviewer: parsed.approvalsReviewer ?? null,
+        sandbox: parsed.sandbox ?? null,
+        config: parsed.config ?? null,
+        serviceTier: parsed.serviceTier ?? null,
+        serviceName: null,
+        baseInstructions: parsed.baseInstructions ?? null,
+        developerInstructions: parsed.developerInstructions ?? null,
+        personality: parsed.personality ?? null,
+        persistExtendedHistory: parsed.persistExtendedHistory,
         launchConfig: await this.createBackendSessionLaunchConfig(parsed.threadId),
       });
       runtime.backendType = entry.backendType;
@@ -1328,6 +1388,21 @@ export class AppServerConnection {
       this.reconcileLoadedTurnIds(parsed.threadId, turns);
       this.transitionToReady(parsed.threadId, runtime);
       const thread = this.buildThread(entry, turns);
+      this.recordThreadExecutionContext(entry.threadId, {
+        cwd: parsed.cwd ?? entry.cwd ?? process.cwd(),
+        approvalPolicy: parsed.approvalPolicy ?? DEFAULT_APPROVAL_POLICY,
+        approvalsReviewer: parsed.approvalsReviewer ?? DEFAULT_APPROVALS_REVIEWER,
+        sandbox: parsed.sandbox ?? null,
+        sandboxPolicy: buildSandboxPolicy(parsed.sandbox ?? null, parsed.cwd ?? thread.cwd),
+        config: parsed.config ?? null,
+        serviceTier: parsed.serviceTier ?? null,
+        serviceName: null,
+        baseInstructions: parsed.baseInstructions ?? null,
+        developerInstructions: parsed.developerInstructions ?? null,
+        personality: parsed.personality ?? null,
+        summary: null,
+        collaborationMode: null,
+      });
       await this.publishThreadStatus(parsed.threadId);
       return await this.buildThreadExecutionResponse(
         thread,
@@ -1395,6 +1470,16 @@ export class AppServerConnection {
         cwd: parsed.cwd ?? sourceEntry.cwd ?? process.cwd(),
         model: requestedSelection?.selection.rawModelId ?? null,
         reasoningEffort: effectiveReasoningEffort,
+        approvalPolicy: parsed.approvalPolicy ?? null,
+        approvalsReviewer: parsed.approvalsReviewer ?? null,
+        sandbox: parsed.sandbox ?? null,
+        config: parsed.config ?? null,
+        serviceTier: parsed.serviceTier ?? null,
+        serviceName: null,
+        baseInstructions: parsed.baseInstructions ?? null,
+        developerInstructions: parsed.developerInstructions ?? null,
+        ephemeral: parsed.ephemeral ?? null,
+        persistExtendedHistory: parsed.persistExtendedHistory,
         launchConfig: await this.createBackendSessionLaunchConfig(forkThreadId),
       });
       const ephemeral = parsed.ephemeral ?? false;
@@ -1431,6 +1516,24 @@ export class AppServerConnection {
       const turns = [...readResult.turns];
       this.reconcileLoadedTurnIds(entry.threadId, turns);
       const thread = this.buildThread(entry, turns);
+      this.recordThreadExecutionContext(entry.threadId, {
+        cwd: parsed.cwd ?? sourceEntry.cwd ?? process.cwd(),
+        approvalPolicy: parsed.approvalPolicy ?? DEFAULT_APPROVAL_POLICY,
+        approvalsReviewer: parsed.approvalsReviewer ?? DEFAULT_APPROVALS_REVIEWER,
+        sandbox: parsed.sandbox ?? null,
+        sandboxPolicy: buildSandboxPolicy(
+          parsed.sandbox ?? null,
+          parsed.cwd ?? sourceEntry.cwd ?? process.cwd()
+        ),
+        config: parsed.config ?? null,
+        serviceTier: parsed.serviceTier ?? null,
+        serviceName: null,
+        baseInstructions: parsed.baseInstructions ?? null,
+        developerInstructions: parsed.developerInstructions ?? null,
+        personality: null,
+        summary: null,
+        collaborationMode: null,
+      });
       await this.publish("thread/started", { thread }, entry.threadId);
       await this.publishThreadStatus(entry.threadId);
       return await this.buildThreadExecutionResponse(
@@ -1601,6 +1704,7 @@ export class AppServerConnection {
       threadHandle: entry.backendSessionId,
     });
     this.threadRuntimes.delete(parsed.threadId);
+    this.threadExecutionContexts.delete(parsed.threadId);
     await this.threadRegistry.update(parsed.threadId, { archived: true });
     await this.publish("thread/archived", { threadId: parsed.threadId }, parsed.threadId);
     return {};
@@ -1687,6 +1791,36 @@ export class AppServerConnection {
       entry = await this.threadRegistry.update(parsed.threadId, threadPatch);
     }
 
+    const existingExecutionContext = this.cloneThreadExecutionContext(parsed.threadId);
+    this.recordThreadExecutionContext(parsed.threadId, {
+      cwd: parsed.cwd ?? entry.cwd ?? process.cwd(),
+      approvalPolicy:
+        parsed.approvalPolicy ??
+        existingExecutionContext?.approvalPolicy ??
+        DEFAULT_APPROVAL_POLICY,
+      approvalsReviewer:
+        parsed.approvalsReviewer ??
+        existingExecutionContext?.approvalsReviewer ??
+        DEFAULT_APPROVALS_REVIEWER,
+      sandbox: existingExecutionContext?.sandbox ?? null,
+      sandboxPolicy:
+        parsed.sandboxPolicy ??
+        existingExecutionContext?.sandboxPolicy ??
+        buildSandboxPolicy(
+          existingExecutionContext?.sandbox ?? null,
+          parsed.cwd ?? entry.cwd ?? process.cwd()
+        ),
+      config: existingExecutionContext?.config ?? null,
+      serviceTier: parsed.serviceTier ?? existingExecutionContext?.serviceTier ?? null,
+      serviceName: existingExecutionContext?.serviceName ?? null,
+      baseInstructions: existingExecutionContext?.baseInstructions ?? null,
+      developerInstructions: existingExecutionContext?.developerInstructions ?? null,
+      personality: parsed.personality ?? existingExecutionContext?.personality ?? null,
+      summary: parsed.summary ?? existingExecutionContext?.summary ?? null,
+      collaborationMode:
+        parsed.collaborationMode ?? existingExecutionContext?.collaborationMode ?? null,
+    });
+
     const turnId = randomUUID();
     runtime.status = "turn_active";
     runtime.activeTurnId = turnId;
@@ -1714,6 +1848,14 @@ export class AppServerConnection {
         input: parsed.input,
         model: requestedSelection?.selection.rawModelId ?? null,
         reasoningEffort: effectiveReasoningEffort,
+        approvalPolicy: parsed.approvalPolicy ?? null,
+        approvalsReviewer: parsed.approvalsReviewer ?? null,
+        sandboxPolicy: parsed.sandboxPolicy ?? null,
+        serviceTier: parsed.serviceTier ?? null,
+        summary: parsed.summary ?? null,
+        personality: parsed.personality ?? null,
+        outputSchema: parsed.outputSchema ?? null,
+        collaborationMode: parsed.collaborationMode ?? null,
       });
       if (startedTurn.turnId) {
         backendTurnId = startedTurn.turnId;
@@ -1795,6 +1937,13 @@ export class AppServerConnection {
 
     switch (event.kind) {
       case "notification": {
+        if (event.method === "thread/started") {
+          const updatedThread = await this.syncCanonicalThreadStarted(threadId, event.params);
+          if (updatedThread) {
+            await this.publish("thread/started", { thread: updatedThread }, threadId);
+          }
+          return;
+        }
         const params = await this.rewriteBackendNotification(
           threadId,
           event.threadHandle,
@@ -2002,6 +2151,15 @@ export class AppServerConnection {
     };
   }
 
+  private recordThreadExecutionContext(threadId: string, context: ThreadExecutionContext): void {
+    this.threadExecutionContexts.set(threadId, structuredClone(context));
+  }
+
+  private cloneThreadExecutionContext(threadId: string): ThreadExecutionContext | null {
+    const context = this.threadExecutionContexts.get(threadId);
+    return context ? structuredClone(context) : null;
+  }
+
   private async buildThreadExecutionResponse(
     thread: Thread,
     persistedModel: string | null,
@@ -2157,6 +2315,107 @@ export class AppServerConnection {
     return null;
   }
 
+  private readNativeSubAgentSessionMetadata(sessionPath: string | null): {
+    agentNickname: string | null;
+    agentRole: string | null;
+  } | null {
+    if (!sessionPath) {
+      return null;
+    }
+
+    try {
+      const lines = readFileSync(sessionPath, "utf8")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      for (const line of lines) {
+        const parsed = JSON.parse(line);
+        if (!isRecord(parsed) || parsed.type !== "session_meta" || !isRecord(parsed.payload)) {
+          continue;
+        }
+
+        const payload = parsed.payload;
+        const subagent =
+          isRecord(payload.source) && isRecord(payload.source.subagent)
+            ? payload.source.subagent
+            : null;
+        const threadSpawn =
+          subagent && isRecord(subagent.thread_spawn) ? subagent.thread_spawn : null;
+        return {
+          agentNickname:
+            typeof payload.agent_nickname === "string"
+              ? payload.agent_nickname
+              : typeof threadSpawn?.agent_nickname === "string"
+                ? threadSpawn.agent_nickname
+                : null,
+          agentRole:
+            typeof payload.agent_role === "string"
+              ? payload.agent_role
+              : typeof threadSpawn?.agent_role === "string"
+                ? threadSpawn.agent_role
+                : null,
+        };
+      }
+    } catch {
+      return null;
+    }
+
+    return null;
+  }
+
+  private async syncCanonicalThreadStarted(
+    threadId: string,
+    params: unknown
+  ): Promise<Thread | null> {
+    if (!isRecord(params) || !isRecord(params.thread)) {
+      return null;
+    }
+
+    const entry = await this.threadRegistry.get(threadId);
+    if (!entry) {
+      return null;
+    }
+
+    const backendThread = params.thread;
+    const path = typeof backendThread.path === "string" ? backendThread.path : entry.path;
+    const cwd = typeof backendThread.cwd === "string" ? backendThread.cwd : entry.cwd;
+    const sessionMetadata = this.readNativeSubAgentSessionMetadata(path);
+    const agentNickname = sessionMetadata?.agentNickname ?? entry.agentNickname;
+    const agentRole = sessionMetadata?.agentRole ?? entry.agentRole;
+
+    let source = entry.source;
+    if (isSubAgentThreadSource(entry.source)) {
+      source = {
+        subAgent: {
+          thread_spawn: {
+            ...entry.source.subAgent.thread_spawn,
+            agent_nickname: agentNickname,
+            agent_role: agentRole,
+          },
+        },
+      };
+    }
+
+    if (
+      path === entry.path &&
+      cwd === entry.cwd &&
+      agentNickname === entry.agentNickname &&
+      agentRole === entry.agentRole &&
+      source === entry.source
+    ) {
+      return null;
+    }
+
+    const updated = await this.threadRegistry.update(threadId, {
+      path,
+      cwd,
+      source,
+      agentNickname,
+      agentRole,
+    });
+    return this.buildThread(updated, []);
+  }
+
   private async ensureNativeSubAgentThreads(
     parentThreadId: string,
     item: Record<string, unknown>
@@ -2243,25 +2502,40 @@ export class AppServerConnection {
     return nativeChildren;
   }
 
-  private rewriteNativeSubAgentToolItem(
+  private async rewriteNativeSubAgentToolItem(
     parentThreadId: string,
+    parentThreadHandle: string,
+    backendType: string,
     item: Record<string, unknown>,
     nativeChildren: readonly NativeSubAgentInfo[]
-  ): Record<string, unknown> {
+  ): Promise<Record<string, unknown>> {
     const childThreadIdByBackendId = new Map(
       nativeChildren.map((child) => [child.backendThreadId, child.localThreadId])
     );
+
+    const resolveThreadReference = async (value: unknown): Promise<unknown> => {
+      if (typeof value !== "string") {
+        return value;
+      }
+      if (value === parentThreadId || value === parentThreadHandle) {
+        return parentThreadId;
+      }
+      const existingThreadId = childThreadIdByBackendId.get(value);
+      if (existingThreadId) {
+        return existingThreadId;
+      }
+      const existing = await this.threadRegistry.findByBackendSessionId(value, backendType);
+      return existing?.threadId ?? value;
+    };
+
+    const receiverThreadIds = Array.isArray(item.receiverThreadIds)
+      ? await Promise.all(item.receiverThreadIds.map((entry) => resolveThreadReference(entry)))
+      : item.receiverThreadIds;
+
     const rewritten: Record<string, unknown> = {
       ...item,
-      senderThreadId:
-        item.senderThreadId === parentThreadId || typeof item.senderThreadId !== "string"
-          ? item.senderThreadId
-          : (childThreadIdByBackendId.get(item.senderThreadId) ?? parentThreadId),
-      receiverThreadIds: Array.isArray(item.receiverThreadIds)
-        ? item.receiverThreadIds.map((entry) =>
-            typeof entry === "string" ? (childThreadIdByBackendId.get(entry) ?? entry) : entry
-          )
-        : item.receiverThreadIds,
+      senderThreadId: await resolveThreadReference(item.senderThreadId),
+      receiverThreadIds,
       model:
         typeof item.model === "string"
           ? this.backendRouter.canonicalizeModelSelection(item.model)
@@ -2270,10 +2544,12 @@ export class AppServerConnection {
 
     if (isRecord(item.agentsStates)) {
       rewritten.agentsStates = Object.fromEntries(
-        Object.entries(item.agentsStates).map(([key, value]) => [
-          childThreadIdByBackendId.get(key) ?? key,
-          value,
-        ])
+        await Promise.all(
+          Object.entries(item.agentsStates).map(async ([key, value]) => [
+            (await resolveThreadReference(key)) as string,
+            value,
+          ])
+        )
       );
     }
 
@@ -2299,7 +2575,13 @@ export class AppServerConnection {
         rewritten.item.tool === "spawnAgent" && rewritten.item.status === "completed"
           ? await this.ensureNativeSubAgentThreads(threadId, rewritten.item)
           : [];
-      rewritten.item = this.rewriteNativeSubAgentToolItem(threadId, rewritten.item, nativeChildren);
+      rewritten.item = await this.rewriteNativeSubAgentToolItem(
+        threadId,
+        threadHandle,
+        entry.backendType,
+        rewritten.item,
+        nativeChildren
+      );
     }
 
     if (method !== "thread/started" || !isRecord(rewritten) || !isRecord(rewritten.thread)) {
@@ -2519,6 +2801,7 @@ export class AppServerConnection {
 
   private async createCollabChildThread(input: CollabManagerCreateChildThreadInput): Promise<void> {
     const parentEntry = await this.getThreadEntry(input.parentThreadId);
+    const parentContext = this.cloneThreadExecutionContext(input.parentThreadId);
     const entry = await this.threadRegistry.create({
       threadId: input.threadId,
       backendSessionId: input.threadHandle,
@@ -2546,6 +2829,9 @@ export class AppServerConnection {
     });
     const runtime = this.createRuntime(entry.threadId, input.backendType, input.threadHandle, true);
     this.transitionToReady(entry.threadId, runtime);
+    if (parentContext) {
+      this.recordThreadExecutionContext(entry.threadId, parentContext);
+    }
 
     const thread = this.buildThread(entry, []);
     await this.publish("thread/started", { thread }, entry.threadId);

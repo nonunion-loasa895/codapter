@@ -129,8 +129,16 @@ function summarizeThread(thread, normalize) {
   const source =
     typeof thread.source === "string"
       ? thread.source
-      : isRecord(thread.source) && isRecord(thread.source.subAgent)
-        ? "subAgent"
+      : isRecord(thread.source) &&
+          isRecord(thread.source.subAgent) &&
+          isRecord(thread.source.subAgent.thread_spawn)
+        ? {
+            type: "subAgent",
+            parentThreadId: normalize(thread.source.subAgent.thread_spawn.parent_thread_id ?? null),
+            depth: normalize(thread.source.subAgent.thread_spawn.depth ?? null),
+            agentNickname: normalize(thread.source.subAgent.thread_spawn.agent_nickname ?? null),
+            agentRole: normalize(thread.source.subAgent.thread_spawn.agent_role ?? null),
+          }
         : normalize(thread.source);
   return {
     id: normalize(thread.id ?? null),
@@ -324,6 +332,101 @@ function summarizeTapLog(raw) {
   };
 }
 
+function extractThreadIdsFromValue(value, threadIds = new Set()) {
+  if (typeof value === "string") {
+    if (value.startsWith("<id:")) {
+      threadIds.add(value);
+    }
+    return threadIds;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      extractThreadIdsFromValue(entry, threadIds);
+    }
+    return threadIds;
+  }
+  if (!isRecord(value)) {
+    return threadIds;
+  }
+  for (const [key, entry] of Object.entries(value)) {
+    if (
+      (key === "threadId" ||
+        key === "id" ||
+        key === "senderThreadId" ||
+        key === "parentThreadId") &&
+      typeof entry === "string" &&
+      entry.startsWith("<id:")
+    ) {
+      threadIds.add(entry);
+    }
+    extractThreadIdsFromValue(entry, threadIds);
+  }
+  return threadIds;
+}
+
+function buildFocusedThreadFlow(tapSummary) {
+  const latestThreadStart = [...tapSummary.responses]
+    .reverse()
+    .find((entry) => entry.method === "thread/start" && typeof entry.thread?.id === "string");
+  const rootThreadId = latestThreadStart?.thread?.id ?? null;
+  if (!rootThreadId) {
+    return null;
+  }
+
+  const threadIds = new Set([rootThreadId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const notification of tapSummary.notifications) {
+      if (
+        notification.method === "thread/started" &&
+        isRecord(notification.thread?.source) &&
+        notification.thread.source.type === "subAgent" &&
+        typeof notification.thread?.id === "string" &&
+        typeof notification.thread.source.parentThreadId === "string" &&
+        threadIds.has(notification.thread.source.parentThreadId) &&
+        !threadIds.has(notification.thread.id)
+      ) {
+        threadIds.add(notification.thread.id);
+        changed = true;
+      }
+      if (
+        notification.method === "item/completed" &&
+        isRecord(notification.item) &&
+        notification.item.type === "collabAgentToolCall" &&
+        typeof notification.threadId === "string" &&
+        threadIds.has(notification.threadId)
+      ) {
+        for (const childId of notification.item.receiverThreadIds ?? []) {
+          if (typeof childId === "string" && !threadIds.has(childId)) {
+            threadIds.add(childId);
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+
+  const responses = tapSummary.responses.filter((entry) => {
+    if (entry.method === "thread/start") {
+      return true;
+    }
+    const ids = extractThreadIdsFromValue(entry);
+    return [...ids].some((id) => threadIds.has(id));
+  });
+  const notifications = tapSummary.notifications.filter((entry) => {
+    const ids = extractThreadIdsFromValue(entry);
+    return [...ids].some((id) => threadIds.has(id));
+  });
+
+  return {
+    rootThreadId,
+    threadIds: [...threadIds],
+    responses,
+    notifications,
+  };
+}
+
 function summarizeDebugLog(raw) {
   const normalize = createNormalizer();
   return raw
@@ -450,6 +553,7 @@ async function collect(flags) {
     tap: summarizeTapLog(await readFile(resolve(stdioLog), "utf8")),
     debug: debugSummary,
   };
+  summary.focus = buildFocusedThreadFlow(summary.tap);
 
   await writeFile(
     join(scenarioDir, "summary.json"),
@@ -485,18 +589,13 @@ async function compare(flags) {
   const baseline = JSON.parse(await readFile(resolve(baselinePath), "utf8"));
   const candidate = JSON.parse(await readFile(resolve(candidatePath), "utf8"));
   const differences = [];
-  diffJson(
-    "tap.responses",
-    baseline.tap?.responses ?? [],
-    candidate.tap?.responses ?? [],
-    differences
-  );
-  diffJson(
-    "tap.notifications",
-    baseline.tap?.notifications ?? [],
-    candidate.tap?.notifications ?? [],
-    differences
-  );
+  const baselineResponses = baseline.focus?.responses ?? baseline.tap?.responses ?? [];
+  const candidateResponses = candidate.focus?.responses ?? candidate.tap?.responses ?? [];
+  const baselineNotifications = baseline.focus?.notifications ?? baseline.tap?.notifications ?? [];
+  const candidateNotifications =
+    candidate.focus?.notifications ?? candidate.tap?.notifications ?? [];
+  diffJson("responses", baselineResponses, candidateResponses, differences);
+  diffJson("notifications", baselineNotifications, candidateNotifications, differences);
 
   if (differences.length === 0) {
     console.log("No normalized GUI protocol differences detected.");
