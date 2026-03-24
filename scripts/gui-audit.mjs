@@ -184,6 +184,7 @@ function summarizeThread(thread, normalize) {
   return {
     id: normalize(thread.id ?? null),
     preview: normalize(readOptionalString(thread.preview) ?? ""),
+    name: normalize(readOptionalString(thread.name) ?? null),
     source,
     agentNickname: normalize(readOptionalString(thread.agentNickname) ?? null),
     modelProvider: normalize(readOptionalString(thread.modelProvider) ?? null),
@@ -569,9 +570,6 @@ function summarizeTapLog(raw) {
 
 function extractThreadIdsFromValue(value, threadIds = new Set()) {
   if (typeof value === "string") {
-    if (value.startsWith("<id:")) {
-      threadIds.add(value);
-    }
     return threadIds;
   }
   if (Array.isArray(value)) {
@@ -589,10 +587,18 @@ function extractThreadIdsFromValue(value, threadIds = new Set()) {
         key === "id" ||
         key === "senderThreadId" ||
         key === "parentThreadId") &&
-      typeof entry === "string" &&
-      entry.startsWith("<id:")
+      typeof entry === "string"
     ) {
       threadIds.add(entry);
+      continue;
+    }
+    if (key === "receiverThreadIds" && Array.isArray(entry)) {
+      for (const threadId of entry) {
+        if (typeof threadId === "string") {
+          threadIds.add(threadId);
+        }
+      }
+      continue;
     }
     extractThreadIdsFromValue(entry, threadIds);
   }
@@ -652,9 +658,6 @@ function buildFocusedThreadFlow(tapSummary) {
     if (typeof entry.thread?.id === "string" && internalThreadIds.has(entry.thread.id)) {
       return false;
     }
-    if (entry.method === "thread/start") {
-      return true;
-    }
     const ids = extractThreadIdsFromValue(entry);
     return [...ids].some((id) => threadIds.has(id) && !internalThreadIds.has(id));
   });
@@ -669,6 +672,133 @@ function buildFocusedThreadFlow(tapSummary) {
     internalThreadIds: [...internalThreadIds],
     responses,
     notifications,
+  };
+}
+
+function buildVisibleFlow(focusSummary) {
+  if (!isRecord(focusSummary)) {
+    return null;
+  }
+
+  const rootThreadId =
+    typeof focusSummary.rootThreadId === "string" ? focusSummary.rootThreadId : null;
+  const responses = Array.isArray(focusSummary.responses) ? focusSummary.responses : [];
+  const notifications = Array.isArray(focusSummary.notifications) ? focusSummary.notifications : [];
+  if (!rootThreadId) {
+    return null;
+  }
+
+  const children = new Map();
+  const ensureChild = (threadId) => {
+    const existing = children.get(threadId);
+    if (existing) {
+      return existing;
+    }
+    const child = {
+      threadId,
+      displayName: null,
+      preview: "",
+      startCount: 0,
+      turnCompletedCount: 0,
+      userMessageCount: 0,
+      agentMessageCount: 0,
+      commandExecutionCount: 0,
+    };
+    children.set(threadId, child);
+    return child;
+  };
+
+  const visibleNameFromThread = (thread) =>
+    typeof thread?.name === "string" && thread.name.length > 0
+      ? thread.name
+      : typeof thread?.agentNickname === "string" && thread.agentNickname.length > 0
+        ? thread.agentNickname
+        : typeof thread?.source?.agentNickname === "string" &&
+            thread.source.agentNickname.length > 0
+          ? thread.source.agentNickname
+          : null;
+
+  for (const response of responses) {
+    if (!isRecord(response?.thread) || response.thread.id === rootThreadId) {
+      continue;
+    }
+    const child = ensureChild(response.thread.id);
+    child.displayName = visibleNameFromThread(response.thread) ?? child.displayName;
+    child.preview = response.thread.preview || child.preview;
+  }
+
+  let sawWaitCompletion = false;
+  const parent = {
+    waitCompletedCount: 0,
+    agentMessagesAfterWait: [],
+  };
+
+  for (const notification of notifications) {
+    if (!isRecord(notification)) {
+      continue;
+    }
+
+    if (notification.method === "thread/started" && isRecord(notification.thread)) {
+      if (notification.thread.id !== rootThreadId) {
+        const child = ensureChild(notification.thread.id);
+        child.startCount += 1;
+        child.displayName = visibleNameFromThread(notification.thread) ?? child.displayName;
+        child.preview = notification.thread.preview || child.preview;
+      }
+      continue;
+    }
+
+    if (notification.method === "turn/completed" && typeof notification.threadId === "string") {
+      if (notification.threadId !== rootThreadId && children.has(notification.threadId)) {
+        ensureChild(notification.threadId).turnCompletedCount += 1;
+      }
+      continue;
+    }
+
+    if (notification.method !== "item/completed" || !isRecord(notification.item)) {
+      continue;
+    }
+
+    if (notification.threadId === rootThreadId) {
+      if (notification.item.type === "collabAgentToolCall" && notification.item.tool === "wait") {
+        parent.waitCompletedCount += 1;
+        sawWaitCompletion = true;
+        continue;
+      }
+      if (
+        sawWaitCompletion &&
+        notification.item.type === "agentMessage" &&
+        typeof notification.item.text === "string"
+      ) {
+        parent.agentMessagesAfterWait.push(notification.item.text);
+      }
+      continue;
+    }
+
+    if (typeof notification.threadId !== "string" || !children.has(notification.threadId)) {
+      continue;
+    }
+
+    const child = ensureChild(notification.threadId);
+    if (notification.item.type === "userMessage") {
+      child.userMessageCount += 1;
+      continue;
+    }
+    if (notification.item.type === "agentMessage") {
+      child.agentMessageCount += 1;
+      continue;
+    }
+    if (notification.item.type === "commandExecution") {
+      child.commandExecutionCount += 1;
+    }
+  }
+
+  return {
+    rootThreadId,
+    parent,
+    children: [...children.values()].sort((left, right) =>
+      String(left.preview).localeCompare(String(right.preview))
+    ),
   };
 }
 
@@ -808,6 +938,7 @@ async function collect(flags) {
     sessions: sessionSummaries,
   };
   summary.focus = buildFocusedThreadFlow(summary.tap);
+  summary.visible = buildVisibleFlow(summary.focus);
 
   await writeFile(
     join(scenarioDir, "summary.json"),
@@ -844,16 +975,9 @@ async function compare(flags) {
   const baseline = JSON.parse(await readFile(resolve(baselinePath), "utf8"));
   const candidate = JSON.parse(await readFile(resolve(candidatePath), "utf8"));
   const differences = [];
-  const baselineResponses = baseline.focus?.responses ?? baseline.tap?.responses ?? [];
-  const candidateResponses = candidate.focus?.responses ?? candidate.tap?.responses ?? [];
-  const baselineNotifications = baseline.focus?.notifications ?? baseline.tap?.notifications ?? [];
-  const candidateNotifications =
-    candidate.focus?.notifications ?? candidate.tap?.notifications ?? [];
-  const baselineSessions = baseline.sessions ?? [];
-  const candidateSessions = candidate.sessions ?? [];
-  diffJson("responses", baselineResponses, candidateResponses, differences);
-  diffJson("notifications", baselineNotifications, candidateNotifications, differences);
-  diffJson("sessions", baselineSessions, candidateSessions, differences);
+  const baselineVisible = baseline.visible ?? baseline.focus ?? null;
+  const candidateVisible = candidate.visible ?? candidate.focus ?? null;
+  diffJson("visible", baselineVisible, candidateVisible, differences);
 
   if (differences.length === 0) {
     console.log("No normalized GUI protocol differences detected.");

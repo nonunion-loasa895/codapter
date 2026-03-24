@@ -10,6 +10,7 @@ import type {
   BackendImageInput,
   BackendResolveServerRequestInput,
   BackendSessionLaunchConfig,
+  BackendThreadReadResult,
   Disposable,
   IBackend,
 } from "./backend.js";
@@ -1504,6 +1505,7 @@ export class AppServerConnection {
         });
         this.bindRuntimeSubscription(parsed.threadId, runtime);
       }
+      entry = (await this.syncCanonicalThreadRead(parsed.threadId, readResult)) ?? entry;
       const turns = this.normalizeReadTurns(entry, [...readResult.turns]);
       this.reconcileLoadedTurnIds(parsed.threadId, turns);
       const resumedActiveTurnId = collabRuntimeState?.activeTurnId ?? existingActiveTurnId;
@@ -1620,7 +1622,7 @@ export class AppServerConnection {
         launchConfig: await this.createBackendSessionLaunchConfig(forkThreadId),
       });
       const ephemeral = parsed.ephemeral ?? false;
-      const entry = await this.threadRegistry.create({
+      let entry = await this.threadRegistry.create({
         threadId: forkThreadId,
         backendSessionId: forked.threadHandle,
         backendType: sourceEntry.backendType,
@@ -1650,6 +1652,7 @@ export class AppServerConnection {
         includeTurns: true,
         cwd: entry.cwd ?? process.cwd(),
       });
+      entry = (await this.syncCanonicalThreadRead(entry.threadId, readResult)) ?? entry;
       const turns = [...readResult.turns];
       this.reconcileLoadedTurnIds(entry.threadId, turns);
       const thread = this.buildThread(entry, turns);
@@ -1719,6 +1722,7 @@ export class AppServerConnection {
         this.bindRuntimeSubscription(parsed.threadId, runtime);
       }
     }
+    entry = (await this.syncCanonicalThreadRead(parsed.threadId, readResult)) ?? entry;
     const turns = parsed.includeTurns ? this.normalizeReadTurns(entry, [...readResult.turns]) : [];
     if (parsed.includeTurns) {
       this.reconcileLoadedTurnIds(parsed.threadId, turns);
@@ -2684,6 +2688,66 @@ export class AppServerConnection {
       agentRole,
     });
     return this.buildThread(updated, []);
+  }
+
+  private async syncCanonicalThreadRead(
+    threadId: string,
+    readResult: BackendThreadReadResult
+  ): Promise<ThreadRegistryEntry | null> {
+    const entry = await this.threadRegistry.get(threadId);
+    if (!entry) {
+      return null;
+    }
+
+    const path = readResult.path === undefined ? entry.path : readResult.path;
+    const cwd = readResult.cwd ?? entry.cwd;
+    const sessionMetadata =
+      entry.backendType === "codex" ? this.readNativeSubAgentSessionMetadata(path) : null;
+    const agentNickname =
+      sessionMetadata?.agentNickname ??
+      (readResult.agentNickname === undefined ? entry.agentNickname : readResult.agentNickname);
+    const agentRole =
+      sessionMetadata?.agentRole ??
+      (readResult.agentRole === undefined ? entry.agentRole : readResult.agentRole);
+
+    let source = entry.source;
+    if (isSubAgentThreadSource(entry.source)) {
+      source = {
+        subAgent: {
+          thread_spawn: {
+            ...entry.source.subAgent.thread_spawn,
+            agent_nickname: agentNickname,
+            agent_role: agentRole,
+          },
+        },
+      };
+    }
+
+    const name =
+      agentNickname &&
+      (entry.name === null || entry.name === entry.preview || entry.name === entry.agentNickname)
+        ? agentNickname
+        : entry.name;
+
+    if (
+      path === entry.path &&
+      cwd === entry.cwd &&
+      agentNickname === entry.agentNickname &&
+      agentRole === entry.agentRole &&
+      name === entry.name &&
+      source === entry.source
+    ) {
+      return null;
+    }
+
+    return await this.threadRegistry.update(threadId, {
+      path,
+      cwd,
+      source,
+      agentNickname,
+      agentRole,
+      name,
+    });
   }
 
   private async ensureNativeSubAgentThreads(

@@ -390,7 +390,16 @@ export class CodexBackend implements IBackend {
       threadId: input.threadHandle,
       includeTurns: input.includeTurns,
     })) as {
-      thread?: { id?: string; name?: string | null; turns?: unknown[]; model?: string | null };
+      thread?: {
+        id?: string;
+        name?: string | null;
+        turns?: unknown[];
+        model?: string | null;
+        path?: string | null;
+        cwd?: string | null;
+        agentNickname?: string | null;
+        agentRole?: string | null;
+      };
     };
     const thread = response.thread ?? {};
     const threadHandle = typeof thread.id === "string" ? thread.id : input.threadHandle;
@@ -399,6 +408,16 @@ export class CodexBackend implements IBackend {
       threadHandle,
       title: typeof thread.name === "string" ? thread.name : null,
       model: typeof thread.model === "string" ? rawModelId(thread.model) : null,
+      ...((typeof thread.path === "string" || thread.path === null) && {
+        path: thread.path ?? null,
+      }),
+      ...(typeof thread.cwd === "string" && { cwd: thread.cwd }),
+      ...((typeof thread.agentNickname === "string" || thread.agentNickname === null) && {
+        agentNickname: thread.agentNickname ?? null,
+      }),
+      ...((typeof thread.agentRole === "string" || thread.agentRole === null) && {
+        agentRole: thread.agentRole ?? null,
+      }),
       turns: Array.isArray(thread.turns)
         ? (rewriteInboundModelFields(thread.turns) as BackendThreadReadResult["turns"])
         : [],

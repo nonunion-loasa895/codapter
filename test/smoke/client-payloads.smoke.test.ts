@@ -255,6 +255,91 @@ async function createMockCodexSubagentScript(rootDir: string): Promise<string> {
   return scriptPath;
 }
 
+async function createMockCodexSubagentReadBackfillScript(rootDir: string): Promise<string> {
+  const parentSessionPath = join(rootDir, "codex-parent-no-nickname.jsonl");
+  const childSessionPath = join(rootDir, "codex-child-backfill.jsonl");
+  await writeFile(parentSessionPath, "", "utf8");
+  await writeFile(
+    childSessionPath,
+    `${JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: "child_backend",
+        agent_nickname: "Euler",
+        agent_role: "default",
+        source: {
+          subagent: {
+            thread_spawn: {
+              parent_thread_id: "parent_backend",
+              depth: 1,
+              agent_nickname: "Euler",
+              agent_role: "default",
+            },
+          },
+        },
+      },
+    })}\n`,
+    "utf8"
+  );
+  const scriptPath = join(rootDir, "mock-codex-subagent-read-backfill.mjs");
+  const script = [
+    "import { StringDecoder } from 'node:string_decoder';",
+    `const parentSessionPath = ${JSON.stringify(parentSessionPath)};`,
+    `const childSessionPath = ${JSON.stringify(childSessionPath)};`,
+    "const decoder = new StringDecoder('utf8');",
+    "let buffer = '';",
+    "",
+    "function write(value) { process.stdout.write(JSON.stringify(value) + '\\n'); }",
+    "function response(id, result) { write({ id, result }); }",
+    "",
+    "function handle(payload) {",
+    "  if (payload.method === 'initialize') {",
+    "    response(payload.id, { userAgent: 'mock-codex', platformFamily: 'unix', platformOs: 'macos' });",
+    "    return;",
+    "  }",
+    "  if (payload.method === 'model/list') {",
+    "    response(payload.id, { data: [{ id: 'gpt-5.4-mini', model: 'gpt-5.4-mini', displayName: 'GPT-5.4-Mini', description: 'Codex smoke model', hidden: false, isDefault: true, inputModalities: ['text'], supportedReasoningEfforts: [{ reasoningEffort: 'medium', description: 'Balanced' }], defaultReasoningEffort: 'medium', supportsPersonality: true }] });",
+    "    return;",
+    "  }",
+    "  if (payload.method === 'thread/start') {",
+    "    response(payload.id, { thread: { id: 'parent_backend', path: parentSessionPath, turns: [] }, model: payload.params.model ?? 'gpt-5.4-mini', reasoningEffort: 'medium' });",
+    "    return;",
+    "  }",
+    "  if (payload.method === 'thread/read') {",
+    "    if (payload.params.threadId === 'child_backend') {",
+    "      response(payload.id, { thread: { id: 'child_backend', path: childSessionPath, cwd: '/Users/kcassidy/codapter', turns: [], model: 'gpt-5.4-mini' }, reasoningEffort: 'medium' });",
+    "      return;",
+    "    }",
+    "    response(payload.id, { thread: { id: payload.params.threadId, path: parentSessionPath, turns: [], model: 'gpt-5.4-mini' }, reasoningEffort: 'medium' });",
+    "    return;",
+    "  }",
+    "  if (payload.method === 'turn/start') {",
+    "    response(payload.id, { turn: { id: 'turn_backend', items: [], status: 'inProgress', error: null } });",
+    "    setTimeout(() => {",
+    "      write({ method: 'turn/started', params: { threadId: payload.params.threadId, turnId: 'turn_backend', turn: { id: 'turn_backend', items: [], status: 'inProgress', error: null } } });",
+    "      write({ method: 'item/completed', params: { threadId: payload.params.threadId, turnId: 'turn_backend', item: { type: 'collabAgentToolCall', id: 'call_spawn_1', tool: 'spawnAgent', status: 'completed', senderThreadId: 'parent_backend', receiverThreadIds: ['child_backend'], prompt: 'Run `date` and report back.', model: payload.params.model ?? 'gpt-5.4-mini', reasoningEffort: 'medium', agentsStates: { child_backend: { status: 'pendingInit', message: null } } } } });",
+    "      write({ method: 'item/completed', params: { threadId: payload.params.threadId, turnId: 'turn_backend', item: { type: 'collabAgentToolCall', id: 'call_wait_1', tool: 'wait', status: 'completed', senderThreadId: 'parent_backend', receiverThreadIds: ['child_backend'], prompt: null, model: null, reasoningEffort: null, agentsStates: { child_backend: { status: 'completed', message: 'Done' } } } } });",
+    "      write({ method: 'turn/completed', params: { threadId: payload.params.threadId, turnId: 'turn_backend', turn: { id: 'turn_backend', items: [], status: 'completed', error: null } } });",
+    "    }, 10);",
+    "    return;",
+    "  }",
+    "}",
+    "",
+    "process.stdin.on('data', (chunk) => {",
+    "  buffer += decoder.write(chunk);",
+    "  const lines = buffer.split('\\n');",
+    "  buffer = lines.pop() ?? '';",
+    "  for (const line of lines) {",
+    "    if (!line.trim()) continue;",
+    "    const parsed = JSON.parse(line);",
+    "    if ('method' in parsed) { handle(parsed); }",
+    "  }",
+    "});",
+  ].join("\n");
+  await writeFile(scriptPath, script, "utf8");
+  return scriptPath;
+}
+
 describe("client payload smoke", () => {
   it("normalizes Pi command turns into structured client items without raw tool JSON", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codapter-client-pi-"));
@@ -552,6 +637,92 @@ describe("client payload smoke", () => {
           thread: {
             id: childThreadId,
             agentNickname: "Averroes",
+            modelProvider: "codex",
+          },
+        },
+      });
+    } finally {
+      await connection.dispose();
+      await backend.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it("backfills routed Codex child nickname from thread/read when spawn output had no nickname", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-client-codex-read-backfill-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: NotificationMessage[] = [];
+    const scriptPath = await createMockCodexSubagentReadBackfillScript(directory);
+    const backend = createCodexBackend({ command: "node", args: [scriptPath] });
+    await backend.initialize();
+    const connection = await initConnection(
+      new BackendRouter([backend]),
+      threadRegistry,
+      notifications
+    );
+
+    try {
+      const started = (await connection.handleMessage({
+        id: 10,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/Users/kcassidy/codapter",
+          modelProvider: "codex",
+          model: "gpt-5.4-mini",
+        },
+      })) as { result: { thread: { id: string } } };
+
+      await connection.handleMessage({
+        id: 11,
+        method: "turn/start",
+        params: {
+          threadId: started.result.thread.id,
+          input: [{ type: "text", text: "spawn a child", text_elements: [] }],
+          model: "gpt-5.4-mini",
+        },
+      });
+
+      await waitFor(() =>
+        notifications.some(
+          (entry) =>
+            entry.method === "thread/started" &&
+            isRecord(entry.params?.thread) &&
+            isRecord(entry.params.thread.source) &&
+            "subAgent" in entry.params.thread.source
+        )
+      );
+
+      const childStarted = notifications.find(
+        (entry) =>
+          entry.method === "thread/started" &&
+          isRecord(entry.params?.thread) &&
+          isRecord(entry.params.thread.source) &&
+          "subAgent" in entry.params.thread.source
+      ) as { params: { thread: { id: string; agentNickname: string | null } } } | undefined;
+      const childThreadId = childStarted?.params.thread.id ?? "";
+      expect(childThreadId).toBeTruthy();
+      expect(childStarted?.params.thread.agentNickname).toBeNull();
+
+      await expect(
+        connection.handleMessage({
+          id: 12,
+          method: "thread/read",
+          params: {
+            threadId: childThreadId,
+            includeTurns: false,
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 12,
+        result: {
+          thread: {
+            id: childThreadId,
+            path: expect.stringContaining("codex-child-backfill.jsonl"),
+            agentNickname: "Euler",
+            agentRole: "default",
+            name: "Euler",
             modelProvider: "codex",
           },
         },

@@ -314,7 +314,7 @@ describe("CollabManager", () => {
     expect(statusChanges).toEqual(["running", "completed"]);
   });
 
-  it("emits a visible parent summary when wait_agent returns child output", async () => {
+  it("does not synthesize a duplicate parent summary when wait_agent returns child output", async () => {
     const { backend, manager, notifications, parentThreadId } = createManager({
       config: { minTimeoutMs: 1, defaultTimeoutMs: 5, maxTimeoutMs: 10 },
     });
@@ -352,11 +352,11 @@ describe("CollabManager", () => {
       timed_out: false,
     });
 
-    expect(
-      notifications
-        .filter((entry) => entry.method === "item/completed")
-        .map((entry) => entry.params)
-    ).toEqual(
+    const completedItems = notifications
+      .filter((entry) => entry.method === "item/completed")
+      .map((entry) => entry.params);
+
+    expect(completedItems).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           item: expect.objectContaining({
@@ -364,14 +364,17 @@ describe("CollabManager", () => {
             tool: "wait",
           }),
         }),
-        expect.objectContaining({
-          item: expect.objectContaining({
-            type: "agentMessage",
-            text: "Robie replied:\n\nThe output is:\n\n```\n/Users/kcassidy/codapter\n```",
-          }),
-        }),
       ])
     );
+    expect(
+      completedItems.some(
+        (entry) =>
+          typeof entry?.item?.type === "string" &&
+          entry.item.type === "agentMessage" &&
+          typeof entry.item.text === "string" &&
+          entry.item.text.includes("Robie replied:")
+      )
+    ).toBe(false);
   });
 
   it("transitions pendingInit to running to errored", async () => {

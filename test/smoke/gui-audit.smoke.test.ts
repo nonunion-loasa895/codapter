@@ -423,6 +423,171 @@ describe("gui audit smoke", () => {
     ]);
   });
 
+  it("summarizes visible post-wait parent messages and child naming for parity review", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-gui-audit-"));
+    directories.push(directory);
+
+    const stdioLogPath = join(directory, "stdio.log");
+    const artifactDir = join(directory, "artifacts");
+    const logLines = [
+      `[2026-03-24T01:00:00.000Z] GUI→CLI: ${JSON.stringify({
+        id: 1,
+        method: "thread/start",
+        params: { cwd: "/Users/kcassidy/codapter", model: "pi::anthropic/claude-opus-4-6" },
+      })}`,
+      `[2026-03-24T01:00:00.100Z] CLI→GUI: ${JSON.stringify({
+        id: 1,
+        result: {
+          thread: {
+            id: "parent-thread",
+            preview: "",
+            source: "appServer",
+            agentNickname: null,
+            modelProvider: "pi",
+            path: "/tmp/parent.jsonl",
+          },
+          model: "pi::anthropic/claude-opus-4-6",
+          reasoningEffort: "medium",
+        },
+      })}`,
+      `[2026-03-24T01:00:00.200Z] CLI→GUI: ${JSON.stringify({
+        method: "thread/started",
+        params: {
+          thread: {
+            id: "child-thread",
+            preview: "Run date",
+            name: "Robie",
+            source: {
+              subAgent: {
+                thread_spawn: {
+                  parent_thread_id: "parent-thread",
+                  depth: 1,
+                  agent_nickname: "Robie",
+                  agent_role: "default",
+                },
+              },
+            },
+            agentNickname: "Robie",
+            modelProvider: "codex",
+            path: "/tmp/child.jsonl",
+          },
+        },
+      })}`,
+      `[2026-03-24T01:00:00.300Z] CLI→GUI: ${JSON.stringify({
+        method: "item/completed",
+        params: {
+          threadId: "child-thread",
+          turnId: "child-turn",
+          item: {
+            type: "userMessage",
+            content: [{ type: "text", text: "Run date", text_elements: [] }],
+          },
+        },
+      })}`,
+      `[2026-03-24T01:00:00.400Z] CLI→GUI: ${JSON.stringify({
+        method: "item/completed",
+        params: {
+          threadId: "child-thread",
+          turnId: "child-turn",
+          item: {
+            type: "commandExecution",
+            command: "/bin/zsh -lc date",
+            status: "completed",
+            aggregatedOutput: "Tue Mar 24 01:13:15 CDT 2026\n",
+            exitCode: 0,
+          },
+        },
+      })}`,
+      `[2026-03-24T01:00:00.500Z] CLI→GUI: ${JSON.stringify({
+        method: "turn/completed",
+        params: {
+          threadId: "child-thread",
+          turn: { id: "child-turn", items: [], status: "completed", error: null },
+        },
+      })}`,
+      `[2026-03-24T01:00:00.600Z] CLI→GUI: ${JSON.stringify({
+        method: "item/completed",
+        params: {
+          threadId: "parent-thread",
+          turnId: "parent-turn",
+          item: {
+            type: "collabAgentToolCall",
+            tool: "wait",
+            status: "completed",
+            senderThreadId: "parent-thread",
+            receiverThreadIds: ["child-thread"],
+            prompt: null,
+            model: null,
+            reasoningEffort: null,
+            agentsStates: {
+              "child-thread": {
+                status: "completed",
+                message: "Tue Mar 24 01:13:15 CDT 2026",
+              },
+            },
+          },
+        },
+      })}`,
+      `[2026-03-24T01:00:00.700Z] CLI→GUI: ${JSON.stringify({
+        method: "item/completed",
+        params: {
+          threadId: "parent-thread",
+          turnId: "parent-turn",
+          item: {
+            type: "agentMessage",
+            text: "Robie replied:\n\nTue Mar 24 01:13:15 CDT 2026",
+          },
+        },
+      })}`,
+      `[2026-03-24T01:00:00.800Z] CLI→GUI: ${JSON.stringify({
+        method: "item/completed",
+        params: {
+          threadId: "parent-thread",
+          turnId: "parent-turn",
+          item: {
+            type: "agentMessage",
+            text: "The `date` command returned Tue Mar 24 01:13:15 CDT 2026.",
+          },
+        },
+      })}`,
+    ].join("\n");
+    await writeFile(stdioLogPath, `${logLines}\n`, "utf8");
+
+    const summaryDir = await runNodeScript(
+      [
+        "scripts/gui-audit.mjs",
+        "collect",
+        "--scenario",
+        "synthetic-visible",
+        "--artifact-dir",
+        artifactDir,
+        "--stdio-log",
+        stdioLogPath,
+      ],
+      "/Users/kcassidy/codapter"
+    );
+
+    const summary = JSON.parse(await readFile(join(summaryDir, "summary.json"), "utf8"));
+    expect(summary.visible).toMatchObject({
+      parent: {
+        waitCompletedCount: 1,
+        agentMessagesAfterWait: [
+          "Robie replied:\n\nTue Mar 24 01:13:15 CDT 2026",
+          "The `date` command returned Tue Mar 24 01:13:15 CDT 2026.",
+        ],
+      },
+      children: [
+        {
+          displayName: "Robie",
+          preview: "Run date",
+          userMessageCount: 1,
+          commandExecutionCount: 1,
+          turnCompletedCount: 1,
+        },
+      ],
+    });
+  });
+
   it("flags child transcripts that stall immediately after exec_command output", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codapter-gui-audit-"));
     directories.push(directory);

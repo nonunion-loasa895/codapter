@@ -54,9 +54,10 @@ npm run gui:audit:collect -- \
 The collector copies the raw logs and writes:
 
 1. `summary.json` with normalized GUI-facing request/response/notification sequences,
-2. `summary.json.sessions[]` with normalized native Codex session transcript summaries when `--session-log` is provided,
-3. `metadata.json` with the captured inputs,
-4. `raw/` with the original stdio and debug logs.
+2. `summary.json.visible` with a focused parity digest for the visible parent/child flow,
+3. `summary.json.sessions[]` with normalized native Codex session transcript summaries when `--session-log` is provided,
+4. `metadata.json` with the captured inputs,
+5. `raw/` with the original stdio and debug logs.
 
 When a routed run diverges from native Codex on the same scenario, compare the normalized summaries directly:
 
@@ -67,6 +68,15 @@ npm run gui:audit:compare -- \
 ```
 
 This comparison is intentionally focused on GUI-visible protocol shape, not byte-for-byte transport parity.
+
+Use `summary.json.visible` first when reviewing parity manually. It is designed to answer:
+
+1. which child threads were visible in the focused flow,
+2. whether a child had a display name,
+3. whether the child reached a command execution and turn completion,
+4. how many parent agent messages appeared after `wait_agent`.
+
+That last count is especially useful for catching routed Pi regressions where the parent shows both a synthetic wait summary and the model's own final answer.
 
 ## Prompt Discipline
 
@@ -150,6 +160,8 @@ For every failed case, capture all of:
 7. whether the failure reproduced after a clean restart.
 
 After collecting those artifacts, run `gui:audit:collect` so every failure has a comparable normalized summary.
+
+When reviewing sub-agent rows in the sidebar, do not treat the unlabeled nested `Archive thread 1m` accessibility row as a routed-only bug. Native Codex snapshots show the same row shape today. Treat it as a parity issue only if routed behavior diverges from the native baseline in click behavior or opened thread content.
 
 For Codex-backed sub-agent failures, also capture the parent and child session transcripts:
 

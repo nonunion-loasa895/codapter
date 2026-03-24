@@ -161,6 +161,10 @@ export interface BackendThreadReadResult {
   readonly threadHandle: string;
   readonly title: string | null;
   readonly model: string | null;
+  readonly path?: string | null;
+  readonly cwd?: string | null;
+  readonly agentNickname?: string | null;
+  readonly agentRole?: string | null;
   readonly turns: readonly Turn[];
 }
 
