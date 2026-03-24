@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import { validateHeaderValue } from "node:http";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { BackendRouter, type RoutedBackendSelection } from "./backend-router.js";
 import type {
@@ -142,6 +143,7 @@ export interface AppServerConnectionOptions {
   readonly backendRouter?: BackendRouter;
   readonly collabEnabled?: boolean;
   readonly configStore?: InMemoryConfigStore;
+  readonly initialAuthState?: StoredAuthState | null;
   readonly identity?: AppServerIdentity;
   readonly logger?: AppServerLogger;
   readonly debugLogFilePath?: string | null;
@@ -197,7 +199,7 @@ interface ThreadExecutionContext {
   readonly collaborationMode: JsonValue | null;
 }
 
-type StoredAuthState =
+export type StoredAuthState =
   | { mode: "apikey"; apiKey: string }
   | {
       mode: "chatgptAuthTokens";
@@ -339,6 +341,11 @@ function extractChatgptIdentity(accessToken: string): { email: string | null; pl
     payload?.profile && typeof payload.profile === "object"
       ? (payload.profile as Record<string, unknown>)
       : null;
+  const openaiProfile =
+    payload?.["https://api.openai.com/profile"] &&
+    typeof payload["https://api.openai.com/profile"] === "object"
+      ? (payload["https://api.openai.com/profile"] as Record<string, unknown>)
+      : null;
   const authClaims =
     payload?.["https://api.openai.com/auth"] &&
     typeof payload["https://api.openai.com/auth"] === "object"
@@ -347,13 +354,55 @@ function extractChatgptIdentity(accessToken: string): { email: string | null; pl
   const email =
     typeof payload?.email === "string"
       ? payload.email
-      : typeof profile?.email === "string"
-        ? profile.email
-        : null;
+      : typeof openaiProfile?.email === "string"
+        ? openaiProfile.email
+        : typeof profile?.email === "string"
+          ? profile.email
+          : null;
   return {
     email,
     planType: normalizePlanType(authClaims?.chatgpt_plan_type),
   };
+}
+
+export function readStoredAuthState(): StoredAuthState | null {
+  const authPath = resolve(homedir(), ".codex", "auth.json");
+  if (!existsSync(authPath)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(authPath, "utf8"));
+    if (!isRecord(parsed)) {
+      return null;
+    }
+
+    const tokens = isRecord(parsed.tokens) ? parsed.tokens : null;
+    const accessToken = typeof tokens?.access_token === "string" ? tokens.access_token : null;
+    const accountId = typeof tokens?.account_id === "string" ? tokens.account_id : null;
+    if (accessToken && accountId) {
+      const identity = extractChatgptIdentity(accessToken);
+      return {
+        mode: "chatgptAuthTokens",
+        accessToken,
+        accountId,
+        email: identity.email,
+        planType: identity.planType,
+      };
+    }
+
+    const apiKey = typeof parsed.OPENAI_API_KEY === "string" ? parsed.OPENAI_API_KEY : null;
+    if (apiKey && apiKey.length > 0) {
+      return {
+        mode: "apikey",
+        apiKey,
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
 
 function buildSandboxPolicy(mode: SandboxMode | null | undefined, cwd: string): SandboxPolicy {
@@ -562,6 +611,7 @@ export class AppServerConnection {
   private readonly collabReady: Promise<void>;
   private readonly threadRuntimes = new Map<string, ThreadRuntime>();
   private readonly threadExecutionContexts = new Map<string, ThreadExecutionContext>();
+  private readonly streamedCommandItemsByThread = new Map<string, Set<string>>();
   private readonly pendingBackendServerRequests = new Map<
     string | number,
     PendingBackendServerRequest
@@ -597,6 +647,7 @@ export class AppServerConnection {
         await this.publish(notification.method, notification.params);
       },
     });
+    this.authState = options.initialAuthState ?? null;
     if (this.collabEnabled) {
       const notifySink: CollabManagerNotificationSink = {
         notify: async (method, params, threadId) => {
@@ -1018,6 +1069,27 @@ export class AppServerConnection {
     return this.backendRouter.canonicalizeModelSelection(model);
   }
 
+  private coerceModelToRequestedProvider(
+    model: string | null,
+    modelProvider: string | null | undefined,
+    explicitlyRequestedModel: string | null | undefined
+  ): string | null {
+    if (!model) {
+      return model;
+    }
+    if (!explicitlyRequestedModel && !this.backendRouter.parseModelSelection(model)) {
+      return null;
+    }
+    if (explicitlyRequestedModel || !modelProvider) {
+      return model;
+    }
+    const parsed = this.backendRouter.parseModelSelection(model);
+    if (!parsed || parsed.selection.backendType !== modelProvider) {
+      return null;
+    }
+    return model;
+  }
+
   private resolveRequestedReasoningEffort(
     cwd: string | null,
     requestedEffort: string | null | undefined,
@@ -1240,14 +1312,22 @@ export class AppServerConnection {
     await this.collabReady;
     const threadId = randomUUID();
     const ephemeral = parsed.ephemeral ?? false;
-    const effectiveModel = this.resolveRequestedModel(parsed.cwd ?? null, parsed.model, null, null);
+    const effectiveModel = this.coerceModelToRequestedProvider(
+      this.resolveRequestedModel(parsed.cwd ?? null, parsed.model, null, null),
+      parsed.modelProvider,
+      parsed.model
+    );
     const effectiveReasoningEffort = this.resolveRequestedReasoningEffort(
       parsed.cwd ?? null,
       parsed.config?.model_reasoning_effort as string | null | undefined,
       null,
       null
     );
-    const selection = await this.resolveThreadStartSelection(effectiveModel, ephemeral);
+    const selection = await this.resolveThreadStartSelection(
+      effectiveModel,
+      parsed.modelProvider,
+      ephemeral
+    );
     const backend = selection.backend;
     const threadStart = await backend.threadStart({
       threadId,
@@ -1344,9 +1424,13 @@ export class AppServerConnection {
     const collabAgent = isSubAgentThreadSource(entry.source)
       ? (this.collabManager?.getAgentByThreadId(parsed.threadId) ?? null)
       : null;
+    const collabRuntimeState = collabAgent
+      ? (this.collabManager?.getAgentRuntimeStateByThreadId(parsed.threadId) ?? null)
+      : null;
     const needsCollabResume =
       collabAgent?.status === "shutdown" || collabAgent?.status === "errored";
     const existing = this.threadRuntimes.get(parsed.threadId);
+    const existingActiveTurnId = existing?.activeTurnId ?? null;
     const runtime = existing
       ? this.prepareRuntimeForResume(parsed.threadId, existing)
       : this.createRuntime(
@@ -1420,9 +1504,24 @@ export class AppServerConnection {
         });
         this.bindRuntimeSubscription(parsed.threadId, runtime);
       }
-      const turns = [...readResult.turns];
+      const turns = this.normalizeReadTurns(entry, [...readResult.turns]);
       this.reconcileLoadedTurnIds(parsed.threadId, turns);
-      this.transitionToReady(parsed.threadId, runtime);
+      const resumedActiveTurnId = collabRuntimeState?.activeTurnId ?? existingActiveTurnId;
+      const shouldRemainActive =
+        collabRuntimeState?.status === "running" || collabRuntimeState?.status === "pendingInit";
+      if (shouldRemainActive) {
+        const from = runtime.status;
+        runtime.status = "turn_active";
+        runtime.statusOverride = null;
+        runtime.readyResolver?.();
+        runtime.readyResolver = null;
+        runtime.readyPromise = null;
+        runtime.activeTurnId = resumedActiveTurnId;
+        runtime.latestTurnId = resumedActiveTurnId ?? runtime.latestTurnId;
+        this.logTransition(parsed.threadId, from, "turn_active");
+      } else {
+        this.transitionToReady(parsed.threadId, runtime);
+      }
       const thread = this.buildThread(entry, turns);
       this.recordThreadExecutionContext(entry.threadId, {
         cwd: parsed.cwd ?? entry.cwd ?? process.cwd(),
@@ -1620,7 +1719,7 @@ export class AppServerConnection {
         this.bindRuntimeSubscription(parsed.threadId, runtime);
       }
     }
-    const turns = parsed.includeTurns ? [...readResult.turns] : [];
+    const turns = parsed.includeTurns ? this.normalizeReadTurns(entry, [...readResult.turns]) : [];
     if (parsed.includeTurns) {
       this.reconcileLoadedTurnIds(parsed.threadId, turns);
     }
@@ -1992,6 +2091,7 @@ export class AppServerConnection {
           event.method,
           event.params
         );
+        this.trackStreamedCommandItem(threadId, event.method, params);
         await this.publish(event.method, params, threadId);
         if (event.method === "turn/started" && turnId && runtime) {
           const previousTurnId = runtime.activeTurnId;
@@ -2261,10 +2361,11 @@ export class AppServerConnection {
 
   private async resolveThreadStartSelection(
     model: string | null,
+    modelProvider: string | null | undefined,
     ephemeral: boolean
   ): Promise<RoutedBackendSelection> {
     try {
-      return await this.backendRouter.resolveModelSelection(model);
+      return await this.backendRouter.resolveModelSelection(model, modelProvider);
     } catch (error) {
       if (!ephemeral || !model || parseBackendModelId(model)) {
         throw error;
@@ -2405,6 +2506,133 @@ export class AppServerConnection {
     return null;
   }
 
+  private readNativeSessionTurnIds(sessionPath: string | null): string[] | null {
+    if (!sessionPath) {
+      return null;
+    }
+
+    try {
+      const turnIds: string[] = [];
+      const seen = new Set<string>();
+      const lines = readFileSync(sessionPath, "utf8")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      for (const line of lines) {
+        const parsed = JSON.parse(line);
+        if (!isRecord(parsed)) {
+          continue;
+        }
+
+        let turnId: string | null = null;
+        if (parsed.type === "turn_context" && isRecord(parsed.payload)) {
+          turnId = typeof parsed.payload.turn_id === "string" ? parsed.payload.turn_id : null;
+        } else if (
+          parsed.type === "event_msg" &&
+          isRecord(parsed.payload) &&
+          parsed.payload.type === "task_started"
+        ) {
+          turnId = typeof parsed.payload.turn_id === "string" ? parsed.payload.turn_id : null;
+        }
+
+        if (!turnId || seen.has(turnId)) {
+          continue;
+        }
+        seen.add(turnId);
+        turnIds.push(turnId);
+      }
+
+      return turnIds;
+    } catch {
+      return null;
+    }
+  }
+
+  private normalizeReadTurns(entry: ThreadRegistryEntry, turns: Turn[]): Turn[] {
+    if (entry.backendType !== "codex" || turns.length === 0) {
+      return turns;
+    }
+
+    const sessionTurnIds = this.readNativeSessionTurnIds(entry.path);
+    if (!sessionTurnIds || sessionTurnIds.length === 0) {
+      return turns;
+    }
+
+    const allowedTurnIds = new Set(sessionTurnIds);
+    const filtered = turns.filter((turn) => allowedTurnIds.has(turn.id));
+    return filtered.length > 0 ? filtered : turns;
+  }
+
+  private trackStreamedCommandItem(threadId: string, method: string, params: unknown): void {
+    if (
+      method === "item/commandExecution/outputDelta" &&
+      isRecord(params) &&
+      typeof params.itemId === "string"
+    ) {
+      const streamed = this.streamedCommandItemsByThread.get(threadId) ?? new Set<string>();
+      streamed.add(params.itemId);
+      this.streamedCommandItemsByThread.set(threadId, streamed);
+      return;
+    }
+
+    if (
+      method === "item/completed" &&
+      isRecord(params) &&
+      isRecord(params.item) &&
+      params.item.type === "commandExecution" &&
+      typeof params.item.id === "string"
+    ) {
+      this.streamedCommandItemsByThread.get(threadId)?.delete(params.item.id);
+      return;
+    }
+
+    if (method !== "turn/completed") {
+      return;
+    }
+
+    if (!isRecord(params) || !isRecord(params.turn) || typeof params.turn.id !== "string") {
+      return;
+    }
+
+    const streamed = this.streamedCommandItemsByThread.get(threadId);
+    if (streamed && streamed.size === 0) {
+      this.streamedCommandItemsByThread.delete(threadId);
+    }
+  }
+
+  private rewriteCompletedCommandOutput(
+    threadId: string,
+    method: string,
+    rewritten: unknown
+  ): unknown {
+    if (
+      method !== "item/completed" ||
+      !isRecord(rewritten) ||
+      !isRecord(rewritten.item) ||
+      rewritten.item.type !== "commandExecution" ||
+      typeof rewritten.item.id !== "string"
+    ) {
+      return rewritten;
+    }
+
+    const streamed = this.streamedCommandItemsByThread.get(threadId);
+    if (!streamed?.has(rewritten.item.id)) {
+      return rewritten;
+    }
+
+    if (!("aggregatedOutput" in rewritten.item) || rewritten.item.aggregatedOutput === null) {
+      return rewritten;
+    }
+
+    return {
+      ...rewritten,
+      item: {
+        ...rewritten.item,
+        aggregatedOutput: null,
+      },
+    };
+  }
+
   private async syncCanonicalThreadStarted(
     threadId: string,
     params: unknown
@@ -2511,7 +2739,7 @@ export class AppServerConnection {
         model,
         modelProvider: parentEntry.backendType,
         reasoningEffort,
-        name: null,
+        name: nickname ?? prompt.slice(0, 120),
         source: {
           subAgent: {
             thread_spawn: {
@@ -2604,7 +2832,7 @@ export class AppServerConnection {
     method: string,
     params: unknown
   ): Promise<unknown> {
-    const rewritten = this.rewriteBackendThreadReferences(threadId, threadHandle, params);
+    let rewritten = this.rewriteBackendThreadReferences(threadId, threadHandle, params);
     const entry = await this.threadRegistry.get(threadId);
 
     if (
@@ -2625,6 +2853,8 @@ export class AppServerConnection {
         nativeChildren
       );
     }
+
+    rewritten = this.rewriteCompletedCommandOutput(threadId, method, rewritten);
 
     if (method !== "thread/started" || !isRecord(rewritten) || !isRecord(rewritten.thread)) {
       return rewritten;
@@ -2854,7 +3084,7 @@ export class AppServerConnection {
       model: input.model,
       modelProvider: input.backendType,
       reasoningEffort: input.reasoningEffort,
-      name: null,
+      name: input.nickname ?? input.preview,
       source: {
         subAgent: {
           thread_spawn: {

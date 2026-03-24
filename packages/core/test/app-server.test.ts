@@ -1620,13 +1620,13 @@ describe("AppServerConnection", () => {
       result: {
         data: [
           {
-            id: "pi::model_1",
-            model: "pi::anthropic/claude-opus-4-6",
+            id: "gpt-5.4",
+            model: "gpt-5.4",
             upgrade: null,
             upgradeInfo: null,
             availabilityNux: null,
-            displayName: "pi / Claude Opus 4.6",
-            description: "Pi model",
+            displayName: "GPT-5.4",
+            description: "Codex model",
             hidden: false,
             supportedReasoningEfforts: [
               {
@@ -1640,13 +1640,13 @@ describe("AppServerConnection", () => {
             isDefault: true,
           },
           {
-            id: "gpt-5.4",
-            model: "gpt-5.4",
+            id: "pi::model_1",
+            model: "pi::anthropic/claude-opus-4-6",
             upgrade: null,
             upgradeInfo: null,
             availabilityNux: null,
-            displayName: "GPT-5.4",
-            description: "Codex model",
+            displayName: "pi / Claude Opus 4.6",
+            description: "Pi model",
             hidden: false,
             supportedReasoningEfforts: [
               {
@@ -1738,8 +1738,8 @@ describe("AppServerConnection", () => {
         collabSocketPath: expect.stringContaining("codapter-collab-"),
         availableModelsDescription:
           "Available models (use the model id exactly as shown):\n" +
-          "- pi::anthropic/claude-opus-4-6: medium\n" +
-          "- gpt-5.4: medium",
+          "- gpt-5.4: medium\n" +
+          "- pi::anthropic/claude-opus-4-6: medium",
       });
     } finally {
       await connection.dispose();
@@ -2679,7 +2679,7 @@ describe("AppServerConnection", () => {
         result: {
           thread: {
             id: childThreadId,
-            status: { type: "idle" },
+            status: { type: "active", activeFlags: ["turn"] },
           },
         },
       });
@@ -2695,10 +2695,9 @@ describe("AppServerConnection", () => {
         })
       ).resolves.toMatchObject({
         id: 6,
-        result: {
-          turn: {
-            status: "inProgress",
-          },
+        error: {
+          code: -32603,
+          message: expect.stringContaining("not ready"),
         },
       });
 
@@ -2784,11 +2783,7 @@ describe("AppServerConnection", () => {
         },
       });
 
-      expect(prompts.map((prompt) => prompt.text)).toEqual([
-        "initial task",
-        "illegal",
-        "after resume",
-      ]);
+      expect(prompts.map((prompt) => prompt.text)).toEqual(["initial task", "after resume"]);
       expect(
         notifications.find(
           (notification) =>
@@ -3533,7 +3528,7 @@ describe("AppServerConnection", () => {
         result: {
           thread: {
             id: childThreadId,
-            status: { type: "idle" },
+            status: { type: "active", activeFlags: ["turn"] },
             turns: [
               {
                 items: [
@@ -3546,6 +3541,182 @@ describe("AppServerConnection", () => {
               },
             ],
           },
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await connection.dispose();
+    }
+  });
+
+  it("keeps a running collab child active across resume and rejects overlapping direct turns", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-active-resume-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    let childSessionId = "";
+    let childTurnId = "";
+    const backend = new TestBackend(async ({ sessionId, turnId, text }) => {
+      if (text !== "initial task") {
+        return;
+      }
+
+      childSessionId = sessionId;
+      childTurnId = turnId;
+      backend.sessionHistories.set(sessionId, [
+        {
+          id: "user-1",
+          role: "user",
+          content: [{ type: "text", text }],
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      ]);
+
+      queueMicrotask(() => {
+        backend.emit(sessionId, {
+          type: "tool_start",
+          sessionId,
+          turnId,
+          toolCallId: "tool-1",
+          toolName: "bash",
+          input: { command: ["sleep", "10"] },
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      collabEnabled: true,
+      threadRegistry,
+      onMessage(message) {
+        notifications.push(message as { method: string; params?: Record<string, unknown> });
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+
+      const socketPath = connection.collabSocketPath;
+      expect(socketPath).toBeTruthy();
+
+      await callSocket(socketPath ?? "", {
+        id: 3,
+        method: "collab/spawn",
+        params: {
+          parentThreadId: started.result.thread.id,
+          message: "initial task",
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const childThreads = (await connection.handleMessage({
+        id: 4,
+        method: "thread/list",
+        params: { sourceKinds: ["subAgent"] },
+      })) as { result: { data: Array<{ id: string }> } };
+      const childThreadId = childThreads.result.data[0]?.id ?? "";
+      expect(childThreadId).toBeTruthy();
+      expect(childSessionId).toBeTruthy();
+      expect(childTurnId).toBeTruthy();
+
+      await expect(
+        connection.handleMessage({
+          id: 5,
+          method: "thread/resume",
+          params: {
+            threadId: childThreadId,
+            persistExtendedHistory: false,
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 5,
+        result: {
+          thread: {
+            id: childThreadId,
+            status: { type: "active", activeFlags: ["turn"] },
+            turns: [
+              {
+                items: [
+                  {
+                    type: "userMessage",
+                    content: [{ type: "text", text: "initial task" }],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      });
+
+      await expect(
+        connection.handleMessage({
+          id: 6,
+          method: "turn/start",
+          params: {
+            threadId: childThreadId,
+            input: [{ type: "text", text: "overlapping follow-up", text_elements: [] }],
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 6,
+        error: {
+          code: -32603,
+          message: expect.stringContaining("not ready"),
+        },
+      });
+
+      backend.emit(childSessionId, {
+        type: "message_end",
+        sessionId: childSessionId,
+        turnId: childTurnId,
+        text: "done:initial task",
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect(
+        notifications.find(
+          (notification) =>
+            notification.method === "turn/completed" &&
+            notification.params?.threadId === childThreadId
+        )
+      ).toMatchObject({
+        method: "turn/completed",
+        params: {
+          threadId: childThreadId,
+          turn: {
+            status: "completed",
+          },
+        },
+      });
+      expect(
+        notifications.findLast(
+          (notification) =>
+            notification.method === "thread/status/changed" &&
+            notification.params?.threadId === childThreadId
+        )
+      ).toMatchObject({
+        method: "thread/status/changed",
+        params: {
+          threadId: childThreadId,
+          status: { type: "idle" },
         },
       });
     } finally {
@@ -5382,6 +5553,127 @@ describe("AppServerConnection", () => {
     });
   });
 
+  it("drops aggregated command output on proxied completions after streaming deltas", async () => {
+    const backend = new CodexProxyTestBackend();
+    const outbound: Array<Record<string, unknown>> = [];
+    const connection = new AppServerConnection({
+      backendRouter: new BackendRouter([backend]),
+      onMessage(message) {
+        outbound.push(message as Record<string, unknown>);
+      },
+    });
+
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    const started = (await connection.handleMessage({
+      id: 2,
+      method: "thread/start",
+      params: {
+        cwd: "/repo",
+        model: "gpt-5.4-mini",
+        experimentalRawEvents: false,
+        persistExtendedHistory: false,
+      },
+    })) as { result: { thread: { id: string } } };
+    const threadId = started.result.thread.id;
+
+    backend.emit("codex_thread_handle", {
+      kind: "notification",
+      threadHandle: "codex_thread_handle",
+      method: "turn/started",
+      params: {
+        threadId: "codex_thread_handle",
+        turn: {
+          id: "turn_backend",
+          items: [],
+          status: "inProgress",
+          error: null,
+        },
+      },
+    });
+    backend.emit("codex_thread_handle", {
+      kind: "notification",
+      threadHandle: "codex_thread_handle",
+      method: "item/started",
+      params: {
+        threadId: "codex_thread_handle",
+        turnId: "turn_backend",
+        item: {
+          type: "commandExecution",
+          id: "cmd_1",
+          command: "/bin/zsh -lc 'pwd'",
+          cwd: "/repo",
+          processId: "123",
+          status: "inProgress",
+          commandActions: [{ type: "unknown", command: "pwd" }],
+          aggregatedOutput: null,
+          exitCode: null,
+          durationMs: null,
+        },
+      },
+    });
+    backend.emit("codex_thread_handle", {
+      kind: "notification",
+      threadHandle: "codex_thread_handle",
+      method: "item/commandExecution/outputDelta",
+      params: {
+        threadId: "codex_thread_handle",
+        turnId: "turn_backend",
+        itemId: "cmd_1",
+        delta: "/repo\n",
+      },
+    });
+    backend.emit("codex_thread_handle", {
+      kind: "notification",
+      threadHandle: "codex_thread_handle",
+      method: "item/completed",
+      params: {
+        threadId: "codex_thread_handle",
+        turnId: "turn_backend",
+        item: {
+          type: "commandExecution",
+          id: "cmd_1",
+          command: "/bin/zsh -lc 'pwd'",
+          cwd: "/repo",
+          processId: "123",
+          status: "completed",
+          commandActions: [{ type: "unknown", command: "pwd" }],
+          aggregatedOutput: "/repo\n",
+          exitCode: 0,
+          durationMs: 10,
+        },
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(
+      outbound.find(
+        (message) =>
+          message.method === "item/completed" &&
+          isRecord(message.params) &&
+          isRecord(message.params.item) &&
+          message.params.item.type === "commandExecution"
+      )
+    ).toMatchObject({
+      method: "item/completed",
+      params: {
+        threadId,
+        item: {
+          id: "cmd_1",
+          aggregatedOutput: null,
+        },
+      },
+    });
+  });
+
   it("creates local child threads for native Codex sub-agents and rewrites their ids", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codapter-codex-native-subagent-"));
     const sessionPath = join(directory, "parent.jsonl");
@@ -5503,6 +5795,7 @@ describe("AppServerConnection", () => {
       expect(childThreadId).toBeTruthy();
       expect(childThreadId).not.toBe("child_backend_handle");
       expect(childStarted?.params.thread.agentNickname).toBe("Ptolemy");
+      expect(childStarted?.params.thread.name).toBe("Ptolemy");
 
       const completed = outbound.find(
         (message) =>
@@ -5753,6 +6046,222 @@ describe("AppServerConnection", () => {
             },
           },
         },
+      });
+    } finally {
+      await connection.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("filters parent ancestry from native Codex child resume history", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-codex-native-resume-history-"));
+    const parentSessionPath = join(directory, "parent.jsonl");
+    const childSessionPath = join(directory, "child.jsonl");
+    await writeFile(
+      parentSessionPath,
+      [
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "call_spawn_1",
+            output: JSON.stringify({
+              agent_id: "child_backend_handle",
+              nickname: "Ptolemy",
+            }),
+          },
+        }),
+      ].join("\n"),
+      "utf8"
+    );
+    await writeFile(
+      childSessionPath,
+      [
+        JSON.stringify({
+          type: "turn_context",
+          payload: {
+            turn_id: "child_turn_1",
+          },
+        }),
+        JSON.stringify({
+          type: "turn_context",
+          payload: {
+            turn_id: "child_turn_2",
+          },
+        }),
+      ].join("\n"),
+      "utf8"
+    );
+
+    const outbound: Array<Record<string, unknown>> = [];
+    const backend = new CodexProxyTestBackend(parentSessionPath);
+    backend.threadResume = async (input: { threadHandle: string; model: string | null }) => ({
+      threadHandle: input.threadHandle,
+      path: input.threadHandle === "child_backend_handle" ? childSessionPath : parentSessionPath,
+      model: input.model,
+      reasoningEffort: "medium",
+    });
+    backend.threadRead = async (input: { threadHandle: string }) => ({
+      threadHandle: input.threadHandle,
+      title: null,
+      model: "gpt-5.4-mini",
+      turns:
+        input.threadHandle === "child_backend_handle"
+          ? [
+              {
+                id: "parent_turn",
+                status: "completed",
+                error: null,
+                items: [
+                  {
+                    type: "userMessage",
+                    id: "parent_user",
+                    content: [{ type: "input_text", text: "Parent prompt" }],
+                  },
+                ],
+              },
+              {
+                id: "child_turn_1",
+                status: "completed",
+                error: null,
+                items: [
+                  {
+                    type: "userMessage",
+                    id: "child_user_1",
+                    content: [{ type: "input_text", text: "Run `date`" }],
+                  },
+                ],
+              },
+              {
+                id: "child_turn_2",
+                status: "completed",
+                error: null,
+                items: [
+                  {
+                    type: "agentMessage",
+                    id: "child_agent_2",
+                    text: "Mon Mar 23 23:59:00 CDT 2026",
+                    phase: null,
+                  },
+                ],
+              },
+            ]
+          : [],
+    });
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const connection = new AppServerConnection({
+      backendRouter: new BackendRouter([backend]),
+      threadRegistry,
+      onMessage(message) {
+        outbound.push(message as Record<string, unknown>);
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          cwd: "/repo",
+          model: "gpt-5.4-mini",
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+        },
+      })) as { result: { thread: { id: string } } };
+      const parentThreadId = started.result.thread.id;
+
+      backend.emit("codex_thread_handle", {
+        kind: "notification",
+        threadHandle: "codex_thread_handle",
+        method: "item/completed",
+        params: {
+          threadId: "codex_thread_handle",
+          turnId: "turn_backend",
+          item: {
+            type: "collabAgentToolCall",
+            id: "call_spawn_1",
+            tool: "spawnAgent",
+            status: "completed",
+            senderThreadId: "codex_thread_handle",
+            receiverThreadIds: ["child_backend_handle"],
+            prompt: "Run the `date` command and report back.",
+            model: "gpt-5.4-mini",
+            reasoningEffort: "medium",
+            agentsStates: {
+              child_backend_handle: {
+                status: "completed",
+                message: "Done",
+              },
+            },
+          },
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const childStarted = outbound.find(
+        (message) =>
+          message.method === "thread/started" &&
+          isRecord(message.params) &&
+          isRecord(message.params.thread) &&
+          isRecord(message.params.thread.source) &&
+          "subAgent" in message.params.thread.source
+      ) as { params: { thread: { id: string } } } | undefined;
+      const childThreadId = childStarted?.params.thread.id ?? "";
+      expect(childThreadId).toBeTruthy();
+
+      await expect(
+        connection.handleMessage({
+          id: 3,
+          method: "thread/resume",
+          params: {
+            threadId: childThreadId,
+            persistExtendedHistory: false,
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 3,
+        result: {
+          thread: {
+            id: childThreadId,
+            turns: [{ id: "child_turn_1" }, { id: "child_turn_2" }],
+          },
+        },
+      });
+
+      const resumed = (await connection.handleMessage({
+        id: 4,
+        method: "thread/read",
+        params: {
+          threadId: childThreadId,
+          includeTurns: true,
+        },
+      })) as { result: { thread: { turns: Array<{ id: string }> } } };
+      expect(resumed.result.thread.turns.map((turn) => turn.id)).toEqual([
+        "child_turn_1",
+        "child_turn_2",
+      ]);
+
+      const parentWait = outbound.find(
+        (message) =>
+          message.method === "item/completed" &&
+          isRecord(message.params) &&
+          isRecord(message.params.item) &&
+          message.params.item.type === "collabAgentToolCall" &&
+          message.params.item.tool === "spawnAgent"
+      ) as { params: { item: Record<string, unknown> } } | undefined;
+      expect(parentWait?.params.item).toMatchObject({
+        senderThreadId: parentThreadId,
+        receiverThreadIds: [childThreadId],
       });
     } finally {
       await connection.dispose();

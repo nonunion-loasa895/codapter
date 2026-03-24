@@ -27,7 +27,7 @@ import type {
   CollabWaitRequest,
   CollabWaitResponse,
 } from "./collab-types.js";
-import type { JsonValue, SandboxMode } from "./protocol.js";
+import type { JsonValue, SandboxMode, UserInput } from "./protocol.js";
 
 const DEFAULT_CONFIG: CollabConfig = {
   maxAgents: 10,
@@ -36,6 +36,41 @@ const DEFAULT_CONFIG: CollabConfig = {
   minTimeoutMs: 10_000,
   maxTimeoutMs: 3_600_000,
 };
+
+function previewFromItems(items: readonly UserInput[] | undefined, fallback: string): string {
+  if (!items || items.length === 0) {
+    return fallback;
+  }
+
+  const text = items
+    .flatMap((item) => {
+      switch (item.type) {
+        case "text":
+          return [item.text];
+        case "image":
+          return [`[image] ${item.url}`];
+        case "localImage":
+          return [`[local image] ${item.path}`];
+        case "skill":
+          return [`[skill:${item.name}] ${item.path}`];
+        case "mention":
+          return [`[mention:${item.name}] ${item.path}`];
+      }
+    })
+    .join("\n")
+    .trim();
+
+  return text || fallback;
+}
+
+function hasCombinedMessageAndItems(
+  message: string | undefined,
+  items: readonly UserInput[] | undefined
+): boolean {
+  return (
+    typeof message === "string" && message.length > 0 && Array.isArray(items) && items.length > 0
+  );
+}
 
 interface CollabAgentRuntime {
   backendType: string;
@@ -173,6 +208,9 @@ export class CollabManager {
     const depth = this.depthForParent(req.parentThreadId) + 1;
     const threadId = randomUUID();
     const parentBackendType = this.resolveThreadBackendType(req.parentThreadId);
+    if (parentBackendType === "codex" && hasCombinedMessageAndItems(req.message, req.items)) {
+      throw new Error("Provide either message or items, but not both");
+    }
     const parentBackend = this.requireBackend(parentBackendType);
     const modelSelection = req.model
       ? await this.backendRouter.resolveModelSelection(req.model)
@@ -229,6 +267,7 @@ export class CollabManager {
     const selectedModel = modelSelection
       ? this.backendRouter.toClientModelId(backendType, modelSelection.selection.rawModelId)
       : (req.model ?? null);
+    const promptPreview = previewFromItems(req.items, req.message);
 
     try {
       await this.createChildThread({
@@ -241,7 +280,7 @@ export class CollabManager {
         threadHandle,
         path: threadStart.path,
         depth,
-        preview: req.message.slice(0, 120),
+        preview: promptPreview.slice(0, 120),
         model: selectedModel,
         reasoningEffort: threadStart.reasoningEffort ?? req.reasoningEffort ?? null,
       });
@@ -262,13 +301,13 @@ export class CollabManager {
 
       const startedItem = this.createToolItem(req.parentThreadId, "spawnAgent", {
         receiverThreadIds: [],
-        prompt: req.message,
+        prompt: promptPreview,
         model: req.model ?? null,
         reasoningEffort: req.reasoningEffort ?? null,
       });
       await this.emitToolItem("item/started", req.parentThreadId, startedItem);
 
-      await this.beginAgentTurn(agent, req.message);
+      await this.beginAgentTurn(agent, promptPreview);
 
       startedItem.status = "completed";
       startedItem.receiverThreadIds = [agent.threadId];
@@ -276,7 +315,10 @@ export class CollabManager {
       await this.emitToolItem("item/completed", req.parentThreadId, startedItem);
 
       this.transitionAgent(agentId, "running", null);
-      void this.startPrompt(agentId, req.message);
+      void this.startPrompt(
+        agentId,
+        req.items ?? [{ type: "text", text: req.message, text_elements: [] }]
+      );
 
       return {
         agent_id: agentId,
@@ -298,6 +340,10 @@ export class CollabManager {
 
   async sendInput(req: CollabSendInputRequest): Promise<CollabSendInputResponse> {
     const agent = this.requireOwnedAgent(req.parentThreadId, req.id);
+    const parentBackendType = this.resolveThreadBackendType(req.parentThreadId);
+    if (parentBackendType === "codex" && hasCombinedMessageAndItems(req.message, req.items)) {
+      throw new Error("Provide either message or items, but not both");
+    }
     const runtime = this.agentRuntimes.get(agent.agentId);
     if (agent.status === "shutdown") {
       throw new Error(`Agent ${req.id} is shutdown and must be resumed before sending input`);
@@ -311,9 +357,10 @@ export class CollabManager {
       );
     }
 
+    const promptPreview = previewFromItems(req.items, req.message);
     const item = this.createToolItem(req.parentThreadId, "sendInput", {
       receiverThreadIds: [agent.threadId],
-      prompt: req.message,
+      prompt: promptPreview,
       model: null,
       reasoningEffort: null,
     });
@@ -332,9 +379,12 @@ export class CollabManager {
     }
 
     const submissionId = randomUUID();
-    await this.beginAgentTurn(agent, req.message);
+    await this.beginAgentTurn(agent, promptPreview);
     this.transitionAgent(agent.agentId, "running", null);
-    void this.startPrompt(agent.agentId, req.message);
+    void this.startPrompt(
+      agent.agentId,
+      req.items ?? [{ type: "text", text: req.message, text_elements: [] }]
+    );
 
     item.status = "completed";
     item.agentsStates = this.collectAgentStates([agent.agentId]);
@@ -618,6 +668,22 @@ export class CollabManager {
     return [...this.agents.values()].find((agent) => agent.threadId === threadId) ?? null;
   }
 
+  getAgentRuntimeStateByThreadId(threadId: string): {
+    status: CollabAgentStatus;
+    activeTurnId: string | null;
+  } | null {
+    const agent = this.getAgentByThreadId(threadId);
+    if (!agent) {
+      return null;
+    }
+
+    const runtime = this.agentRuntimes.get(agent.agentId);
+    return {
+      status: agent.status,
+      activeTurnId: runtime?.activeTurnId ?? null,
+    };
+  }
+
   syncExternalResume(threadId: string, sessionId: string, backendType: string): void {
     const agent = this.getAgentByThreadId(threadId);
     if (!agent) {
@@ -665,7 +731,7 @@ export class CollabManager {
     return turnId;
   }
 
-  private async startPrompt(agentId: string, message: string): Promise<void> {
+  private async startPrompt(agentId: string, input: readonly UserInput[]): Promise<void> {
     const agent = this.agents.get(agentId);
     const runtime = this.agentRuntimes.get(agentId);
     if (!agent || !runtime || !runtime.activeTurnId) {
@@ -686,7 +752,7 @@ export class CollabManager {
         threadHandle: agent.sessionId,
         turnId: runtime.activeTurnId,
         cwd: context?.cwd ?? process.cwd(),
-        input: [{ type: "text", text: message, text_elements: [] }],
+        input: [...input],
         model: selectedModel,
         reasoningEffort: childContext?.reasoningEffort ?? null,
         approvalPolicy: context?.approvalPolicy ?? null,
