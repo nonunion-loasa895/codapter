@@ -243,25 +243,6 @@ export class BackendRouter {
     return (await this.listModelsDetailed()).models;
   }
 
-  async getDefaultModelId(): Promise<string | null> {
-    const models = await this.listModels();
-    return (
-      models.find((entry) => entry.isDefault)?.id ??
-      models.find((entry) => !entry.hidden)?.id ??
-      null
-    );
-  }
-
-  async hasAvailableModel(model: string | null | undefined): Promise<boolean> {
-    const canonicalModel = this.canonicalizeModelSelection(model);
-    if (!canonicalModel) {
-      return false;
-    }
-
-    const models = await this.listModels();
-    return models.some((entry) => entry.id === canonicalModel || entry.model === canonicalModel);
-  }
-
   async resolveModelSelection(model: string | null | undefined): Promise<RoutedBackendSelection> {
     if (model) {
       const parsed = this.parseModelSelection(model);
