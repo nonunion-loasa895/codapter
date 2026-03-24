@@ -1,6 +1,6 @@
 # Routed Backend GUI Test Plan
 
-Status: Draft
+Status: Active
 
 ## Purpose
 
@@ -15,6 +15,57 @@ This plan covers:
 5. command and file-edit rendering,
 6. thread continuity, resume, and fork behavior,
 7. log and MCP evidence collection when a GUI regression appears.
+8. normalized artifact comparison against native Codex as the source of truth.
+
+## Artifact Workflow
+
+Use the native Codex GUI run as the baseline and record each run into its own artifact directory.
+
+Recommended artifact root:
+
+```bash
+mkdir -p /tmp/codapter-gui-audit
+```
+
+After each scenario run, collect the logs into a normalized report:
+
+```bash
+# Native Codex baseline
+npm run gui:audit:collect -- \
+  --scenario native-codex \
+  --artifact-dir /tmp/codapter-gui-audit \
+  --stdio-log /tmp/codapter-codex-stdio.log
+
+# Routed Codex
+npm run gui:audit:collect -- \
+  --scenario routed-codex \
+  --artifact-dir /tmp/codapter-gui-audit \
+  --stdio-log /tmp/codapter-stdio.log \
+  --debug-log /tmp/codapter.jsonl
+
+# Routed Pi
+npm run gui:audit:collect -- \
+  --scenario routed-pi \
+  --artifact-dir /tmp/codapter-gui-audit \
+  --stdio-log /tmp/codapter-stdio.log \
+  --debug-log /tmp/codapter.jsonl
+```
+
+The collector copies the raw logs and writes:
+
+1. `summary.json` with normalized GUI-facing request/response/notification sequences,
+2. `metadata.json` with the captured inputs,
+3. `raw/` with the original stdio and debug logs.
+
+When a routed run diverges from native Codex on the same scenario, compare the normalized summaries directly:
+
+```bash
+npm run gui:audit:compare -- \
+  --baseline /tmp/codapter-gui-audit/native-codex-.../summary.json \
+  --candidate /tmp/codapter-gui-audit/routed-codex-.../summary.json
+```
+
+This comparison is intentionally focused on GUI-visible protocol shape, not byte-for-byte transport parity.
 
 ## Required Environment
 
@@ -39,6 +90,8 @@ printf '# GUI smoke\n' > README.md
 
 4. Before every Pi GUI run, explicitly choose a model in the picker.
    Preferred Pi validation model: `pi / Claude Opus 4.6`.
+
+5. For routed Codex runs, explicitly choose a raw native Codex id in the picker, for example `GPT-5.4-Mini`.
 
 ## Launchers
 
@@ -72,6 +125,8 @@ For every failed case, capture all of:
 5. the exact selected model and backend,
 6. the exact prompt text used,
 7. whether the failure reproduced after a clean restart.
+
+After collecting those artifacts, run `gui:audit:collect` so every failure has a comparable normalized summary.
 
 ## Shared Checks
 
@@ -190,6 +245,7 @@ Expected:
 
 1. This produces the behavioral baseline for routed Codex.
 2. The relevant stdio lines are present in `/tmp/codapter-codex-stdio.log`.
+3. The run is collected into a baseline artifact directory under `/tmp/codapter-gui-audit`.
 
 ### C2. Native sub-agent lifecycle
 

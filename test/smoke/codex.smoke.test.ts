@@ -241,7 +241,8 @@ describeIfCodexSmoke("codex smoke", () => {
       })) as { result: { data: Array<{ id: string }> } };
       const ids = response.result.data.map((entry) => entry.id);
       expect(ids.some((id) => id.startsWith("pi::"))).toBe(true);
-      expect(ids.some((id) => id.startsWith("codex::"))).toBe(true);
+      expect(ids).toContain("gpt-5.4");
+      expect(ids.some((id) => id.startsWith("codex::"))).toBe(false);
     } finally {
       await connection.dispose();
       await codexBackend.dispose();
@@ -273,7 +274,7 @@ describeIfCodexSmoke("codex smoke", () => {
           persistExtendedHistory: false,
           cwd: "/repo",
           modelProvider: "codex",
-          model: "codex::gpt-5.4",
+          model: "gpt-5.4",
         },
       })) as { result: { thread: { id: string } } };
       expect(started.result.thread.id).toBeTruthy();
@@ -284,7 +285,7 @@ describeIfCodexSmoke("codex smoke", () => {
         params: {
           threadId: started.result.thread.id,
           input: [{ type: "text", text: "hello from smoke", text_elements: [] }],
-          model: "codex::gpt-5.4",
+          model: "gpt-5.4",
         },
       });
 

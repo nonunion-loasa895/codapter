@@ -11,6 +11,8 @@
     "build": "tsc -b",
     "build:dist": "npm run build && node scripts/build-dist.mjs",
     "check": "npm run build && npm run lint && npm run test",
+    "gui:audit:collect": "node scripts/gui-audit.mjs collect",
+    "gui:audit:compare": "node scripts/gui-audit.mjs compare",
     "lint": "biome check .",
     "prepare": "husky",
     "test": "vitest run --passWithNoTests",
