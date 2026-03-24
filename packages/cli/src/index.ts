@@ -312,22 +312,7 @@ async function runStdioAppServer(
   });
 
   try {
-    for await (const line of readline) {
-      const trimmed = line.trim();
-      if (trimmed.length === 0) {
-        continue;
-      }
-
-      try {
-        const message = parseNdjsonLine(trimmed);
-        const response = await connection.handleMessage(message);
-        if (response) {
-          stdout.write(serializeNdjsonLine(response));
-        }
-      } catch {
-        stdout.write(serializeNdjsonLine(failure(null, -32700, "Parse error")));
-      }
-    }
+    await pumpStdioMessages(readline, connection, stdout);
   } finally {
     readline.close();
     await connection.dispose();
@@ -353,22 +338,7 @@ function startStdioListener(
 
   const done = (async () => {
     try {
-      for await (const line of readline) {
-        const trimmed = line.trim();
-        if (trimmed.length === 0) {
-          continue;
-        }
-
-        try {
-          const message = parseNdjsonLine(trimmed);
-          const response = await connection.handleMessage(message);
-          if (response) {
-            stdout.write(serializeNdjsonLine(response));
-          }
-        } catch {
-          stdout.write(serializeNdjsonLine(failure(null, -32700, "Parse error")));
-        }
-      }
+      await pumpStdioMessages(readline, connection, stdout);
     } finally {
       readline.close();
       await connection.dispose();
@@ -382,6 +352,48 @@ function startStdioListener(
       await done;
     },
   };
+}
+
+async function pumpStdioMessages(
+  readline: ReturnType<typeof createInterface>,
+  connection: AppServerConnection,
+  stdout: NodeJS.WritableStream
+): Promise<void> {
+  const pending = new Set<Promise<void>>();
+
+  const track = (work: Promise<void>) => {
+    pending.add(work);
+    void work.finally(() => {
+      pending.delete(work);
+    });
+  };
+
+  for await (const line of readline) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+
+    track(handleStdioMessage(trimmed, connection, stdout));
+  }
+
+  await Promise.allSettled([...pending]);
+}
+
+async function handleStdioMessage(
+  line: string,
+  connection: AppServerConnection,
+  stdout: NodeJS.WritableStream
+): Promise<void> {
+  try {
+    const message = parseNdjsonLine(line);
+    const response = await connection.handleMessage(message);
+    if (response) {
+      stdout.write(serializeNdjsonLine(response));
+    }
+  } catch {
+    stdout.write(serializeNdjsonLine(failure(null, -32700, "Parse error")));
+  }
 }
 
 async function startAppServerListener(

@@ -564,13 +564,7 @@ export class AppServerConnection {
     string | number,
     PendingBackendServerRequest
   >();
-  private authState: StoredAuthState | null = {
-    mode: "chatgptAuthTokens",
-    accessToken: "codapter",
-    accountId: "codapter",
-    email: "codapter@localhost",
-    planType: "pro",
-  };
+  private authState: StoredAuthState | null = null;
   private readonly state: ConnectionState = {
     initialized: false,
     initializedNotificationReceived: false,
@@ -1053,7 +1047,7 @@ export class AppServerConnection {
           : null;
     return {
       account,
-      requiresOpenaiAuth: true,
+      requiresOpenaiAuth: this.authState !== null,
     };
   }
 

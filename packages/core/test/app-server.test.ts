@@ -958,13 +958,55 @@ describe("AppServerConnection", () => {
       id: 6,
       result: {
         account: null,
-        requiresOpenaiAuth: true,
+        requiresOpenaiAuth: false,
       },
     });
 
     expect(notifications.at(-1)).toEqual({
       method: "account/updated",
       params: { authMode: null, planType: null },
+    });
+  });
+
+  it("reports no auth state by default", async () => {
+    const connection = new AppServerConnection();
+
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    await expect(
+      connection.handleMessage({
+        id: 2,
+        method: "account/read",
+        params: { refreshToken: false },
+      })
+    ).resolves.toEqual({
+      id: 2,
+      result: {
+        account: null,
+        requiresOpenaiAuth: false,
+      },
+    });
+
+    await expect(
+      connection.handleMessage({
+        id: 3,
+        method: "getAuthStatus",
+        params: { includeToken: true, refreshToken: false },
+      })
+    ).resolves.toEqual({
+      id: 3,
+      result: {
+        authMethod: null,
+        authToken: null,
+        requiresOpenaiAuth: false,
+      },
     });
   });
 

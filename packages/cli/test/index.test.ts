@@ -2,7 +2,7 @@ import { stat, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { PassThrough, Readable } from "node:stream";
 import { createPiBackend } from "@codapter/backend-pi";
-import { BackendRouter } from "@codapter/core";
+import { AppServerConnection, BackendRouter } from "@codapter/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import {
@@ -74,6 +74,46 @@ async function startListeners(listenTargets: readonly string[]) {
     async close() {
       await listeners.close();
       await backend.dispose();
+    },
+  };
+}
+
+function createNdjsonCollector(stream: PassThrough) {
+  const messages = new Map<string | number, unknown>();
+  const waiters = new Map<string | number, (message: unknown) => void>();
+  let buffer = "";
+
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk: string) => {
+    buffer += chunk;
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = buffer.slice(0, newlineIndex).trim();
+      buffer = buffer.slice(newlineIndex + 1);
+      if (line.length > 0) {
+        const message = JSON.parse(line) as { id?: string | number };
+        if (message.id !== undefined) {
+          messages.set(message.id, message);
+          const waiter = waiters.get(message.id);
+          if (waiter) {
+            waiters.delete(message.id);
+            waiter(message);
+          }
+        }
+      }
+      newlineIndex = buffer.indexOf("\n");
+    }
+  });
+
+  return {
+    waitFor(id: string | number): Promise<unknown> {
+      const existing = messages.get(id);
+      if (existing !== undefined) {
+        return Promise.resolve(existing);
+      }
+      return new Promise((resolve) => {
+        waiters.set(id, resolve);
+      });
     },
   };
 }
@@ -209,6 +249,88 @@ describe("runCli", () => {
         platformOs: expect.any(String),
       },
     });
+  });
+
+  it("does not block later stdio requests behind a slow request", async () => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const stdin = new PassThrough();
+    const collector = createNdjsonCollector(stdout);
+    let releaseResume: (() => void) | null = null;
+
+    const originalHandleMessage = AppServerConnection.prototype.handleMessage;
+    const handleMessageSpy = vi
+      .spyOn(AppServerConnection.prototype, "handleMessage")
+      .mockImplementation(function (message: unknown) {
+        if (
+          typeof message === "object" &&
+          message !== null &&
+          "method" in message &&
+          (message as { method?: unknown }).method === "thread/resume"
+        ) {
+          return new Promise((resolve) => {
+            releaseResume = () => {
+              resolve({
+                id: (message as { id?: string | number }).id ?? null,
+                result: { thread: { id: "stalled-thread" } },
+              });
+            };
+          });
+        }
+        return originalHandleMessage.call(this, message);
+      });
+
+    try {
+      const resultPromise = runCli(["app-server"], {
+        stdin,
+        stdout,
+        stderr,
+        env: {},
+      });
+
+      stdin.write(
+        `${JSON.stringify({
+          id: 1,
+          method: "initialize",
+          params: {
+            clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+            capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+          },
+        })}\n`
+      );
+      expect(await collector.waitFor(1)).toMatchObject({
+        id: 1,
+        result: { userAgent: expect.any(String) },
+      });
+
+      stdin.write(`${JSON.stringify({ id: 2, method: "thread/resume", params: {} })}\n`);
+      stdin.write(
+        `${JSON.stringify({
+          id: 3,
+          method: "account/read",
+          params: { refreshToken: false },
+        })}\n`
+      );
+
+      await expect(collector.waitFor(3)).resolves.toMatchObject({
+        id: 3,
+        result: {
+          account: null,
+          requiresOpenaiAuth: false,
+        },
+      });
+
+      releaseResume?.();
+      expect(await collector.waitFor(2)).toMatchObject({
+        id: 2,
+        result: { thread: { id: "stalled-thread" } },
+      });
+
+      stdin.end();
+      expect(await resultPromise).toEqual({ exitCode: 0 });
+    } finally {
+      handleMessageSpy.mockRestore();
+    }
   });
 
   it("runs stdio via --listen stdio with shutdown signal", async () => {
