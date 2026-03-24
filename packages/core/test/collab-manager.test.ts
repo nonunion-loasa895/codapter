@@ -775,4 +775,35 @@ describe("CollabManager", () => {
       }),
     ]);
   });
+
+  it("rejects combined message and items for Codex-backed spawns", async () => {
+    const backend = new TestBackend("codex");
+    const { manager, parentThreadId } = createManager({ backend });
+
+    await expect(
+      manager.spawn({
+        parentThreadId,
+        message: "run date",
+        items: [{ type: "text", text: "run date", text_elements: [] }],
+      })
+    ).rejects.toThrow("Provide either message or items, but not both");
+  });
+
+  it("rejects combined message and items for Codex-backed send_input", async () => {
+    const backend = new TestBackend("codex");
+    const { manager, parentThreadId } = createManager({ backend });
+    const spawned = await manager.spawn({
+      parentThreadId,
+      message: "run date",
+    });
+
+    await expect(
+      manager.sendInput({
+        parentThreadId,
+        id: spawned.agent_id,
+        message: "follow up",
+        items: [{ type: "text", text: "follow up", text_elements: [] }],
+      })
+    ).rejects.toThrow("Provide either message or items, but not both");
+  });
 });

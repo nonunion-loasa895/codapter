@@ -10,8 +10,10 @@ import { createPiBackend } from "@codapter/backend-pi";
 import {
   AppServerConnection,
   BackendRouter,
+  type StoredAuthState,
   failure,
   parseNdjsonLine,
+  readStoredAuthState,
   serializeNdjsonLine,
 } from "@codapter/core";
 import { type RawData, type WebSocket, WebSocketServer } from "ws";
@@ -62,6 +64,7 @@ export interface ListenerOptions {
   readonly stdin?: NodeJS.ReadableStream;
   readonly stdout?: NodeJS.WritableStream;
   readonly collabEnabled?: boolean;
+  readonly initialAuthState?: StoredAuthState | null;
 }
 
 type ParsedListenTarget =
@@ -167,30 +170,40 @@ export async function runCli(
 
   try {
     const parsed = parseListenTargets(commandArgs, env);
-    const piCommand = env.CODAPTER_PI_COMMAND;
-    const piArgsRaw = env.CODAPTER_PI_ARGS;
-    let piArgs: string[] | undefined;
-    if (piArgsRaw) {
-      const parsed = JSON.parse(piArgsRaw);
-      if (!Array.isArray(parsed)) {
-        throw new Error("CODAPTER_PI_ARGS must be a JSON array of strings");
+    const initializedBackends: Array<
+      ReturnType<typeof createPiBackend> | ReturnType<typeof createCodexBackend>
+    > = [];
+    const backends: Array<
+      ReturnType<typeof createPiBackend> | ReturnType<typeof createCodexBackend>
+    > = [];
+    if (!envFlagEnabled(env.CODAPTER_PI_DISABLE)) {
+      const piCommand = env.CODAPTER_PI_COMMAND;
+      const piArgsRaw = env.CODAPTER_PI_ARGS;
+      let piArgs: string[] | undefined;
+      if (piArgsRaw) {
+        const parsed = JSON.parse(piArgsRaw);
+        if (!Array.isArray(parsed)) {
+          throw new Error("CODAPTER_PI_ARGS must be a JSON array of strings");
+        }
+        piArgs = parsed;
       }
-      piArgs = parsed;
+      const piIdleTimeoutRaw = env.CODAPTER_PI_IDLE_TIMEOUT_MS;
+      const piIdleTimeoutMs =
+        piIdleTimeoutRaw && Number.isFinite(Number(piIdleTimeoutRaw))
+          ? Number(piIdleTimeoutRaw)
+          : undefined;
+      const piStaticModelsPath = env.CODAPTER_PI_STATIC_MODELS_FILE?.trim() || undefined;
+      const piBackend = createPiBackend({
+        ...(piCommand ? { command: piCommand } : {}),
+        ...(piArgs ? { args: piArgs } : {}),
+        ...(piIdleTimeoutMs !== undefined ? { idleTimeoutMs: piIdleTimeoutMs } : {}),
+        ...(parsed.collabEnabled ? { collabExtensionPath: resolveCollabExtensionPath(env) } : {}),
+        ...(piStaticModelsPath ? { staticAvailableModelsPath: piStaticModelsPath } : {}),
+      });
+      backends.push(piBackend);
+      initializedBackends.push(piBackend);
+      await piBackend.initialize();
     }
-    const piIdleTimeoutRaw = env.CODAPTER_PI_IDLE_TIMEOUT_MS;
-    const piIdleTimeoutMs =
-      piIdleTimeoutRaw && Number.isFinite(Number(piIdleTimeoutRaw))
-        ? Number(piIdleTimeoutRaw)
-        : undefined;
-    const piStaticModelsPath = env.CODAPTER_PI_STATIC_MODELS_FILE?.trim() || undefined;
-    const piBackend = createPiBackend({
-      ...(piCommand ? { command: piCommand } : {}),
-      ...(piArgs ? { args: piArgs } : {}),
-      ...(piIdleTimeoutMs !== undefined ? { idleTimeoutMs: piIdleTimeoutMs } : {}),
-      ...(parsed.collabEnabled ? { collabExtensionPath: resolveCollabExtensionPath(env) } : {}),
-      ...(piStaticModelsPath ? { staticAvailableModelsPath: piStaticModelsPath } : {}),
-    });
-    await piBackend.initialize();
 
     const codexBackends = [];
     if (!envFlagEnabled(env.CODAPTER_CODEX_DISABLE)) {
@@ -212,6 +225,8 @@ export async function runCli(
         ...(env.CODAPTER_CODEX_WS_URL ? { websocketUrl: env.CODAPTER_CODEX_WS_URL } : {}),
       });
       codexBackends.push(codexBackend);
+      backends.push(codexBackend);
+      initializedBackends.push(codexBackend);
       try {
         await codexBackend.initialize();
       } catch (error) {
@@ -221,8 +236,8 @@ export async function runCli(
       }
     }
 
-    const backendRouter = new BackendRouter([piBackend, ...codexBackends]);
-    const initializedBackends = [piBackend, ...codexBackends];
+    const backendRouter = new BackendRouter(backends);
+    const initialAuthState = backendRouter.getBackend("codex") ? readStoredAuthState() : null;
 
     const signalCodes: Record<string, number> = { SIGINT: 130, SIGTERM: 143 };
     const cleanup = async (signal: string) => {
@@ -236,7 +251,13 @@ export async function runCli(
 
     try {
       if (parsed.listenTargets.length === 0) {
-        await runStdioAppServer(stdin, stdout, backendRouter, parsed.collabEnabled);
+        await runStdioAppServer(
+          stdin,
+          stdout,
+          backendRouter,
+          parsed.collabEnabled,
+          initialAuthState
+        );
         return { exitCode: 0 };
       }
 
@@ -245,6 +266,7 @@ export async function runCli(
         stdin,
         stdout,
         collabEnabled: parsed.collabEnabled,
+        initialAuthState,
       });
       stderr.write(`Listening on ${listeners.addresses.join(", ")}\n`);
 
@@ -299,11 +321,13 @@ async function runStdioAppServer(
   stdin: NodeJS.ReadableStream,
   stdout: NodeJS.WritableStream,
   backendRouter: BackendRouter,
-  collabEnabled = false
+  collabEnabled = false,
+  initialAuthState: StoredAuthState | null = null
 ): Promise<void> {
   const connection = new AppServerConnection({
     backendRouter,
     collabEnabled,
+    initialAuthState,
     onMessage(message) {
       stdout.write(serializeNdjsonLine(message));
     },
@@ -329,6 +353,7 @@ function startStdioListener(
   const connection = new AppServerConnection({
     backendRouter: options.backendRouter,
     collabEnabled: options.collabEnabled,
+    initialAuthState: options.initialAuthState ?? null,
     onMessage(message) {
       stdout.write(serializeNdjsonLine(message));
     },

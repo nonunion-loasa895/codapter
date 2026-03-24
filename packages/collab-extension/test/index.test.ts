@@ -155,10 +155,15 @@ describe("collabExtension", () => {
       expect(tools).toHaveLength(5);
       const spawnTool = tools.find((tool) => tool.name === "spawn_agent");
       expect(spawnTool).toBeDefined();
+      expect(spawnTool?.description).toContain("Use either `message` or `items`.");
       const execute = spawnTool?.execute as
         | ((toolCallId: string, params: Record<string, unknown>) => Promise<unknown>)
         | undefined;
-      await expect(execute?.("call-1", { message: "hi" })).resolves.toMatchObject({
+      await expect(
+        execute?.("call-1", {
+          items: [{ type: "text", text: "hi" }],
+        })
+      ).resolves.toMatchObject({
         details: { echoed: "collab/spawn" },
       });
     } finally {

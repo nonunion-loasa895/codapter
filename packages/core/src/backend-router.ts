@@ -7,6 +7,10 @@ interface AggregatedModelEntry extends BackendModelSummary {
   readonly backendType: string;
 }
 
+interface IndexedAggregatedModelEntry extends AggregatedModelEntry {
+  readonly sourceIndex: number;
+}
+
 function cloneModel(model: BackendModelSummary): BackendModelSummary {
   return {
     ...model,
@@ -60,6 +64,42 @@ export interface BackendModelListResult {
   readonly models: BackendModelSummary[];
   readonly diagnostics: BackendModelListDiagnostic[];
   readonly totalDurationMs: number;
+}
+
+function getPreferredDefaultModel(
+  candidates: readonly AggregatedModelEntry[]
+): AggregatedModelEntry | null {
+  return (
+    candidates.find((model) => model.backendType === NATIVE_BACKEND_TYPE && model.isDefault) ??
+    candidates.find((model) => model.backendType === NATIVE_BACKEND_TYPE && !model.hidden) ??
+    candidates.find((model) => model.isDefault) ??
+    candidates.find((model) => !model.hidden) ??
+    null
+  );
+}
+
+function sortAggregatedModels(
+  candidates: readonly AggregatedModelEntry[]
+): readonly AggregatedModelEntry[] {
+  return candidates
+    .map(
+      (model, sourceIndex): IndexedAggregatedModelEntry => ({
+        ...model,
+        sourceIndex,
+      })
+    )
+    .sort((left, right) => {
+      const leftBackendPriority = left.backendType === NATIVE_BACKEND_TYPE ? 0 : 1;
+      const rightBackendPriority = right.backendType === NATIVE_BACKEND_TYPE ? 0 : 1;
+      if (leftBackendPriority !== rightBackendPriority) {
+        return leftBackendPriority - rightBackendPriority;
+      }
+      if (left.hidden !== right.hidden) {
+        return left.hidden ? 1 : -1;
+      }
+      return left.sourceIndex - right.sourceIndex;
+    })
+    .map(({ sourceIndex: _sourceIndex, ...model }) => model);
 }
 
 export class BackendRouter {
@@ -223,14 +263,12 @@ export class BackendRouter {
       }
     }
 
-    const preferredDefault =
-      candidates.find((model) => model.isDefault) ??
-      candidates.find((model) => !model.hidden) ??
-      null;
+    const preferredDefault = getPreferredDefaultModel(candidates);
     const defaultId = preferredDefault?.id ?? null;
+    const orderedModels = sortAggregatedModels(candidates);
 
     return {
-      models: candidates.map((model) => ({
+      models: orderedModels.map((model) => ({
         ...model,
         isDefault: defaultId !== null && model.id === defaultId,
       })),
@@ -243,7 +281,50 @@ export class BackendRouter {
     return (await this.listModelsDetailed()).models;
   }
 
-  async resolveModelSelection(model: string | null | undefined): Promise<RoutedBackendSelection> {
+  private async resolveDefaultModelSelection(
+    preferredBackendType?: string | null
+  ): Promise<RoutedBackendSelection> {
+    const models = (await this.listModelsDetailed())
+      .models as unknown as readonly AggregatedModelEntry[];
+    const defaultModel =
+      (preferredBackendType
+        ? (models.find((entry) => entry.backendType === preferredBackendType && entry.isDefault) ??
+          models.find((entry) => entry.backendType === preferredBackendType && !entry.hidden))
+        : null) ??
+      models.find((entry) => entry.isDefault) ??
+      null;
+    if (!defaultModel) {
+      throw new Error("No healthy backend models available");
+    }
+
+    const parsed =
+      this.parseModelSelection(defaultModel.model) ?? this.parseModelSelection(defaultModel.id);
+    if (parsed) {
+      return parsed;
+    }
+
+    if (preferredBackendType && defaultModel.backendType === preferredBackendType) {
+      const backend = this.backends.get(preferredBackendType) ?? null;
+      if (backend?.isAlive()) {
+        return {
+          backend,
+          selection: {
+            backendType: preferredBackendType,
+            rawModelId: defaultModel.model,
+          },
+        };
+      }
+    }
+
+    throw new Error(
+      `Failed to parse default model selection: ${defaultModel.model} (${defaultModel.id})`
+    );
+  }
+
+  async resolveModelSelection(
+    model: string | null | undefined,
+    preferredBackendType?: string | null
+  ): Promise<RoutedBackendSelection> {
     if (model) {
       const parsed = this.parseModelSelection(model);
       if (!parsed) {
@@ -262,17 +343,6 @@ export class BackendRouter {
       return parsed;
     }
 
-    const models = await this.listModels();
-    const defaultModel = models.find((entry) => entry.isDefault) ?? null;
-    if (!defaultModel) {
-      throw new Error("No healthy backend models available");
-    }
-
-    const parsed = this.parseModelSelection(defaultModel.id);
-    if (!parsed) {
-      throw new Error(`Failed to parse default model id: ${defaultModel.id}`);
-    }
-
-    return parsed;
+    return await this.resolveDefaultModelSelection(preferredBackendType);
   }
 }
