@@ -2703,12 +2703,20 @@ export class AppServerConnection {
     const cwd = readResult.cwd ?? entry.cwd;
     const sessionMetadata =
       entry.backendType === "codex" ? this.readNativeSubAgentSessionMetadata(path) : null;
+    const preserveExistingSubAgentIdentity = isSubAgentThreadSource(entry.source);
+    const readAgentNickname =
+      readResult.agentNickname === null && preserveExistingSubAgentIdentity
+        ? entry.agentNickname
+        : readResult.agentNickname;
+    const readAgentRole =
+      readResult.agentRole === null && preserveExistingSubAgentIdentity
+        ? entry.agentRole
+        : readResult.agentRole;
     const agentNickname =
       sessionMetadata?.agentNickname ??
-      (readResult.agentNickname === undefined ? entry.agentNickname : readResult.agentNickname);
+      (readAgentNickname === undefined ? entry.agentNickname : readAgentNickname);
     const agentRole =
-      sessionMetadata?.agentRole ??
-      (readResult.agentRole === undefined ? entry.agentRole : readResult.agentRole);
+      sessionMetadata?.agentRole ?? (readAgentRole === undefined ? entry.agentRole : readAgentRole);
 
     let source = entry.source;
     if (isSubAgentThreadSource(entry.source)) {
